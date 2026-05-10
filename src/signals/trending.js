@@ -38,7 +38,8 @@ export function trendingSignalPass(row) {
 }
 
 export async function fetchJupiterTrendingRows(interval, limit) {
-  if (!JUPITER_API_KEY) {
+  const apiKey = JUPITER_API_KEY;
+  if (!apiKey) {
     console.log('[trending:jupiter] JUPITER_API_KEY missing');
     return [];
   }
@@ -48,7 +49,7 @@ export async function fetchJupiterTrendingRows(interval, limit) {
   url.searchParams.set('limit', String(limit));
   const res = await axios.get(url.toString(), {
     timeout: 10_000,
-    headers: { ...JSON_HEADERS, 'x-api-key': JUPITER_API_KEY },
+    headers: { ...JSON_HEADERS, 'x-api-key': apiKey },
   });
   const rows = Array.isArray(res.data) ? res.data : [];
   return rows.map((row, index) => normalizeJupiterTrendingRow(row, window, index + 1));

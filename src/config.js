@@ -1,6 +1,9 @@
 import dotenv from 'dotenv';
+import { fileURLToPath } from 'url';
+import path from 'path';
 
-dotenv.config();
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+dotenv.config({ path: path.resolve(__dirname, '../.env') });
 
 export const APP_NAME = 'Charon';
 export const DB_PATH = process.env.DB_PATH || './charon.sqlite';
@@ -16,7 +19,7 @@ export const TELEGRAM_TOPIC_ID = process.env.TELEGRAM_TOPIC_ID;
 export const HELIUS_API_KEY = process.env.HELIUS_API_KEY;
 export const GMGN_API_KEY = process.env.GMGN_API_KEY;
 export const GMGN_ENABLED = process.env.GMGN_ENABLED !== 'false';
-export const JUPITER_API_KEY = process.env.JUPITER_API_KEY || '';
+export const JUPITER_API_KEY = process.env.JUPITER_API_KEY || 'jup_d9fefba2caabab4065b910464b32c86074210858b28addcb07f75ab97e05290f';
 export const SOLANA_PRIVATE_KEY = process.env.SOLANA_PRIVATE_KEY || process.env.PRIVATE_KEY || '';
 export const SOLANA_RPC_URL = process.env.SOLANA_RPC_URL || `https://mainnet.helius-rpc.com/?api-key=${HELIUS_API_KEY}`;
 export const SOLANA_WS_URL = process.env.SOLANA_WS_URL || `wss://mainnet.helius-rpc.com/?api-key=${HELIUS_API_KEY}`;
@@ -35,7 +38,7 @@ export const GMGN_CACHE_TTL_MS = Number(process.env.GMGN_CACHE_TTL_MS || 5 * 60 
 export const POSITION_CHECK_MS = Number(process.env.POSITION_CHECK_MS || 10_000);
 export const LLM_TIMEOUT_MS = Number(process.env.LLM_TIMEOUT_MS || 60_000);
 export const ENABLE_LLM = process.env.ENABLE_LLM !== 'false';
-export const SIGNAL_SERVER_URL = process.env.SIGNAL_SERVER_URL || 'http://localhost:3456';
+export const SIGNAL_SERVER_URL = (process.env.SIGNAL_SERVER_URL && process.env.SIGNAL_SERVER_URL !== 'disabled') ? process.env.SIGNAL_SERVER_URL : '';
 export const SIGNAL_SERVER_KEY = process.env.SIGNAL_SERVER_KEY || '';
 export const SIGNAL_POLL_MS = Number(process.env.SIGNAL_POLL_MS || 30_000);
 
