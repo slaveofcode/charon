@@ -248,7 +248,7 @@ export async function monitorPositions() {
   }
 
   // Heartbeat ke Telegram tiap 5 menit
-  const HEARTBEAT_INTERVAL_MS = 5 * 60 * 1000;
+  const HEARTBEAT_INTERVAL_MS = 3 * 60 * 1000;
   const sinceHeartbeat = now() - (lastTelegramHeartbeat || 0);
   if (sinceHeartbeat >= HEARTBEAT_INTERVAL_MS && open.length > 0) {
     const lines = [];
