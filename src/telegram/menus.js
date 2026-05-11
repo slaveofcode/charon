@@ -358,18 +358,20 @@ export function positionButtons(positionId) {
     reply_markup: {
       inline_keyboard: [
         [
-          { text: 'Dry Sell', callback_data: `sell:${positionId}` },
-          { text: 'Refresh', callback_data: `pos:${positionId}` },
+          { text: '❌ Close Now', callback_data: `sell:${positionId}` },
+          { text: '🔄 Refresh', callback_data: `pos:${positionId}` },
         ],
         [
-          { text: 'TP +25%', callback_data: `tp:${positionId}:25` },
+          { text: 'TP +30%', callback_data: `tp:${positionId}:30` },
           { text: 'TP +50%', callback_data: `tp:${positionId}:50` },
+          { text: 'TP +75%', callback_data: `tp:${positionId}:75` },
         ],
         [
           { text: 'SL -15%', callback_data: `sl:${positionId}:-15` },
           { text: 'SL -25%', callback_data: `sl:${positionId}:-25` },
+          { text: 'SL -40%', callback_data: `sl:${positionId}:-40` },
         ],
-        [{ text: 'Trail On/Off', callback_data: `trail:${positionId}` }],
+        [{ text: '🔁 Trail On/Off', callback_data: `trail:${positionId}` }],
       ],
     },
   };

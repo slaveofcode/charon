@@ -35,6 +35,9 @@ export async function handleMessage(msg) {
   const chatId = msg.chat.id;
   if (await consumeNumericFilterInput(chatId, text, msg.message_id)) return;
   if (!text.startsWith('/')) return;
+  if (text.startsWith('/close')) return handleClose(chatId, text);
+  if (text.startsWith('/settp')) return handleSetTp(chatId, text);
+  if (text.startsWith('/setsl')) return handleSetSl(chatId, text);
   if (text.startsWith('/menu')) return sendMenu(chatId);
   if (text.startsWith('/positions')) return sendPositions(chatId);
   if (text.startsWith('/filters')) return bot.sendMessage(chatId, filtersText(), { parse_mode: 'HTML' });
@@ -251,11 +254,37 @@ export function setupTelegram() {
     { command: 'walletadd', description: 'Save wallet for exposure/PnL' },
     { command: 'walletremove', description: 'Remove saved wallet' },
     { command: 'wallets', description: 'List saved wallets' },
+    { command: 'close', description: 'Close position by id (/close 2)' },
+    { command: 'settp', description: 'Set TP percent (/settp 2 75)' },
+    { command: 'setsl', description: 'Set SL percent (/setsl 2 -40)' },
   ]).catch(err => console.log(`[telegram] commands ${err.message}`));
 
   bot.on('callback_query', query => handleCallback(query).catch(err => console.log(`[callback] ${err.message}`)));
   bot.on('message', msg => handleMessage(msg).catch(err => console.log(`[message] ${err.message}`)));
   bot.on('polling_error', err => console.log(`[telegram] polling ${err.message}`));
+}
+
+async function handleClose(chatId, text) {
+  const parts = text.split(/\s+/);
+  const id = Number(parts[1]);
+  if (!id) return bot.sendMessage(chatId, 'Usage: /close <id>');
+  return closePosition(chatId, id, 'MANUAL_CLOSE');
+}
+
+async function handleSetTp(chatId, text) {
+  const parts = text.split(/\s+/);
+  const id = Number(parts[1]);
+  const pct = Number(parts[2]);
+  if (!id || !Number.isFinite(pct)) return bot.sendMessage(chatId, 'Usage: /settp <id> <percent>\n\nExample: /settp 2 75');
+  return updatePositionRule(chatId, id, 'tp_percent', Math.abs(pct));
+}
+
+async function handleSetSl(chatId, text) {
+  const parts = text.split(/\s+/);
+  const id = Number(parts[1]);
+  const pct = Number(parts[2]);
+  if (!id || !Number.isFinite(pct)) return bot.sendMessage(chatId, 'Usage: /setsl <id> <percent>\n\nExample: /setsl 2 -40');
+  return updatePositionRule(chatId, id, 'sl_percent', pct);
 }
 
 async function sendMenu(chatId = TELEGRAM_CHAT_ID) {
