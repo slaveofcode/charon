@@ -11,7 +11,7 @@ import { openPositions } from '../db/positions.js';
 import { updateCandidateSnapshot } from '../db/candidates.js';
 import { trending } from '../signals/trending.js';
 import { executeLiveSell } from './router.js';
-import { sendPositionExit } from '../telegram/send.js';
+import { sendTelegram } from '../telegram/send.js';
 
 export async function freshEntryMarket(mint, candidate) {
   const gmgn = await fetchGmgnTokenInfo(mint, false);
@@ -106,6 +106,7 @@ export async function refreshCandidateForExecution(row) {
 }
 
 const sellInProgress = new Set();
+let lastTelegramHeartbeat = 0;
 
 export async function refreshPosition(position, { autoExit = true, jupiterPnl = null } = {}) {
   const asset = await fetchJupiterAsset(position.mint);
@@ -239,6 +240,35 @@ export async function refreshPosition(position, { autoExit = true, jupiterPnl = 
 
 export async function monitorPositions() {
   const positions = openPositions();
+  const nowStr = new Date().toLocaleTimeString('id-ID', { timeZone: 'Asia/Jakarta' });
+  const open = positions.filter(p => p.status === 'open');
+  const positionIds = open.map(p => `#${p.id}`).join(', ');
+  if (positionIds) {
+    console.log(`[position] ${nowStr} monitoring: ${positionIds}`);
+  }
+
+  // Heartbeat ke Telegram tiap 5 menit
+  const HEARTBEAT_INTERVAL_MS = 5 * 60 * 1000;
+  const sinceHeartbeat = now() - (lastTelegramHeartbeat || 0);
+  if (sinceHeartbeat >= HEARTBEAT_INTERVAL_MS && open.length > 0) {
+    const lines = [];
+    for (const p of open) {
+      const asset = await fetchJupiterAsset(p.mint);
+      const price = Number(asset?.usdPrice || 0);
+      const currentMcap = Number(asset?.mcap || 0);
+      const symbol = asset?.symbol || p.mint.slice(0, 8);
+      const entryMcap = Number(p.entry_mcap || 1);
+      const unrealizedPct = entryMcap > 0 ? ((currentMcap / entryMcap) - 1) * 100 : 0;
+      const unrealizedSol = Number(p.size_sol || 0) * unrealizedPct / 100;
+      const emoji = unrealizedPct >= Number(p.tp_percent) ? '🟢' : unrealizedPct <= Number(p.sl_percent) ? '🔴' : '🟡';
+      const slLabel = Number(p.sl_percent) >= 0 ? `${p.sl_percent}% SL` : `SL ${p.sl_percent}%`;
+      lines.push(`${emoji} <b>${symbol}</b> #${p.id} TP:${p.tp_percent}% ` +
+        `${slLabel} | PnL: <b>${unrealizedPct >= 0 ? '+' : ''}${unrealizedPct.toFixed(2)}%</b> (${unrealizedSol >= 0 ? '+' : ''}${unrealizedSol.toFixed(4)} SOL)`);
+    }
+    sendTelegram(`⏱ <b>Position Monitor</b> ${nowStr}\n${lines.join('\n')}`).catch(() => {});
+    lastTelegramHeartbeat = now();
+  }
+
   let walletPnlData = {};
   const pubkey = liveWalletPubkey();
   if (pubkey && positions.some(p => p.execution_mode === 'live')) {
