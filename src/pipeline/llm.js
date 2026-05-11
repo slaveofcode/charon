@@ -154,3 +154,108 @@ export async function decideCandidate(candidate) {
   const decision = await decideCandidateBatch([pseudoRow], 0);
   return normalizeDecision(decision.raw || decision, decision.reason);
 }
+
+/**
+ * LLM decision: should a position that's been open for a while with modest profit 
+ * be closed to free up capital, or held for more upside?
+ * Called when a position has been open > timeExitCheckMin but PnL < TP.
+ * @param {Object} position - row from dry_run_positions
+ * @param {Object} asset - Jupiter asset data (mcap, price, volume, holders)
+ * @param {Object} [extra={}] - gmgn, chart, trending data for richer context
+ */
+export async function decideTimeExit(position, asset, extra = {}) {
+  if (!ENABLE_LLM || !LLM_API_KEY) return 'HOLD';
+
+  const ageMin = (now() - position.opened_at_ms) / 60000;
+  const pnlPercent = position.high_water_mcap && position.entry_mcap
+    ? ((Number(position.high_water_mcap) / Number(position.entry_mcap)) - 1) * 100
+    : 0;
+  // current mcap/price from asset
+  const currentMcap = Number(asset?.mcap || 0);
+  const currentPrice = Number(asset?.usdPrice || 0);
+  const currentPnl = position.entry_mcap && currentMcap
+    ? ((currentMcap / Number(position.entry_mcap)) - 1) * 100
+    : pnlPercent;
+
+  const system = [
+    'You are Charon, a Solana meme coin position manager.',
+    'You have 1 open position that is aging. The market moves fast — capital needs to rotate.',
+    'Return STRICT JSON only. No markdown, no explanation outside JSON.',
+  ].join(' ');
+
+  const user = {
+    task: 'Decide whether to CLOSE or HOLD this open position. It has been open for a while and has modest unrealized profit but has NOT hit its TP target yet. Closing frees capital for fresh setups; holding may bring more gains or a drawdown.',
+    position: {
+      id: position.id,
+      mint: position.mint,
+      symbol: position.symbol || position.mint.slice(0, 8),
+      age_minutes: Math.round(ageMin),
+      entry_mcap: Number(position.entry_mcap),
+      high_water_mcap: Number(position.high_water_mcap || 0),
+      current_mcap: currentMcap || Number(position.high_water_mcap || position.entry_mcap || 0),
+      current_pnl_percent: Math.round(currentPnl * 100) / 100,
+      high_water_pnl_percent: Math.round(pnlPercent * 100) / 100,
+      tp_percent: Number(position.tp_percent),
+      sl_percent: Number(position.sl_percent),
+      size_sol: Number(position.size_sol),
+      trailing_enabled: Boolean(position.trailing_enabled),
+    },
+    token_data: extra.gmgn ? {
+      name: extra.gmgn.name,
+      symbol: extra.gmgn.symbol,
+      price: extra.gmgn.price_usd,
+      liquidity: extra.gmgn.liquidity,
+      holder_count: extra.gmgn.holder_count,
+      volume_24h: extra.gmgn.volume_24h_usd,
+      total_fee_sol: extra.gmgn.total_fee,
+      trade_fee_sol: extra.gmgn.trade_fee,
+      top_10_holder_percent: extra.gmgn.top_10_holder_rate,
+      cto: extra.gmgn.cto,
+      twitter_followers: extra.gmgn.twitter_followers,
+      rug_ratio: extra.gmgn.rug_ratio,
+      bundler_rate: extra.gmgn.bundler_rate,
+    } : null,
+    market_context: extra.chart?.windows ? {
+      windows: extra.chart.windows.slice(0, 3).map(w => ({
+        label: w.label,
+        current: w.current,
+        high: w.high,
+        low: w.low,
+        available: w.available,
+      })),
+    } : null,
+    trending: extra.trending ? {
+      rank: extra.trending.rank,
+      volume: extra.trending.volume,
+      swaps: extra.trending.swaps,
+      hot_level: extra.trending.hot_level,
+    } : null,
+    output_schema: {
+      action: '"CLOSE" or "HOLD"',
+      reason: 'one short sentence explaining why',
+      confidence: 'number 0-100',
+    },
+  };
+
+  try {
+    const res = await axios.post(`${LLM_BASE_URL.replace(/\/$/, '')}/chat/completions`, {
+      model: LLM_MODEL,
+      temperature: 0.2,
+      messages: [
+        { role: 'system', content: system },
+        { role: 'user', content: JSON.stringify(user) },
+      ],
+    }, {
+      timeout: LLM_TIMEOUT_MS,
+      headers: { authorization: `Bearer ${LLM_API_KEY}`, 'content-type': 'application/json' },
+    });
+    const content = res.data?.choices?.[0]?.message?.content || '';
+    const parsed = strictJsonFromText(content);
+    const action = String(parsed?.action || '').toUpperCase() === 'CLOSE' ? 'CLOSE' : 'HOLD';
+    console.log(`[timeExit] #${position.id} ${position.mint.slice(0, 8)}... age:${Math.round(ageMin)}m pnl:${currentPnl.toFixed(1)}% → ${action} (reason: ${parsed?.reason || ''})`);
+    return action;
+  } catch (err) {
+    console.log(`[timeExit] #${position.id} LLM failed: ${err.message}`);
+    return 'HOLD';
+  }
+}

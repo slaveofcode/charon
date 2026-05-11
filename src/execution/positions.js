@@ -12,6 +12,7 @@ import { updateCandidateSnapshot } from '../db/candidates.js';
 import { trending } from '../signals/trending.js';
 import { executeLiveSell } from './router.js';
 import { sendTelegram } from '../telegram/send.js';
+import { decideTimeExit } from '../pipeline/llm.js';
 
 export async function freshEntryMarket(mint, candidate) {
   const gmgn = await fetchGmgnTokenInfo(mint, false);
@@ -167,6 +168,27 @@ export async function refreshPosition(position, { autoExit = true, jupiterPnl = 
     if (slHit) exitReason = 'SL';
     else if (tpHit && !position.trailing_enabled) exitReason = 'TP';
     else if (trailingHit) exitReason = 'TRAILING_TP';
+  }
+
+  // Time-based LLM exit: position open > 45 min, profit > 5% but below TP → ask LLM
+  if (!exitReason && position.execution_mode === 'live') {
+    const ageMin = (now() - position.opened_at_ms) / 60000;
+    const minProfit = 5;
+    const minAge = 45;
+    if (ageMin >= minAge && pnlPercent >= minProfit && pnlPercent < Number(position.tp_percent)) {
+      try {
+        // Fetch extra token context for LLM decision
+        const [gmgn, chart] = await Promise.all([
+          fetchGmgnTokenInfo(position.mint, false).catch(() => null),
+          fetchJupiterChartContext(position.mint).catch(() => null),
+        ]);
+        const trendingToken = trending.get(position.mint) || null;
+        const decision = await decideTimeExit(position, asset, { gmgn, chart, trending: trendingToken });
+        if (decision === 'CLOSE') exitReason = 'TIME_EXIT_LLM';
+      } catch (err) {
+        console.log(`[timeExit] #${position.id} error: ${err.message}`);
+      }
+    }
   }
 
   // Live exits will override these with realized SOL values
