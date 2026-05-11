@@ -175,11 +175,12 @@ export async function refreshPosition(position, { autoExit = true, jupiterPnl = 
   if (!exitReason && position.execution_mode === 'live' && position.token_amount_raw) {
     try {
       const liveBalance = await fetchLiveTokenBalance(position.mint);
-      if (liveBalance === null || Number(liveBalance) === 0) {
-        console.log(`[position] #${position.id} ${position.mint.slice(0, 8)}... token gone from wallet (balance: ${liveBalance}), auto-closing`);
+      // Only close if RPC explicitly returned zero (not null = RPC error/429)
+      if (liveBalance !== null && Number(liveBalance) === 0) {
+        console.log(`[position] #${position.id} ${position.mint.slice(0, 8)}... token gone from wallet (balance: 0), auto-closing`);
         exitReason = 'TOKEN_GONE';
-      } else if (Number(liveBalance) > 0 && !position.token_amount_raw) {
-        // Update actual token amount if we didn't have it
+      } else if (liveBalance !== null && Number(liveBalance) > 0) {
+        // Update actual token amount
         db.prepare('UPDATE dry_run_positions SET token_amount_raw = ? WHERE id = ?').run(String(liveBalance), position.id);
       }
     } catch (err) {
