@@ -13,6 +13,7 @@ import { trending } from '../signals/trending.js';
 import { executeLiveSell } from './router.js';
 import { sendTelegram } from '../telegram/send.js';
 import { decideTimeExit } from '../pipeline/llm.js';
+import { fetchLiveTokenBalance } from '../liveExecutor.js';
 
 export async function freshEntryMarket(mint, candidate) {
   const gmgn = await fetchGmgnTokenInfo(mint, false);
@@ -168,6 +169,22 @@ export async function refreshPosition(position, { autoExit = true, jupiterPnl = 
     if (slHit) exitReason = 'SL';
     else if (tpHit && !position.trailing_enabled) exitReason = 'TP';
     else if (trailingHit) exitReason = 'TRAILING_TP';
+  }
+
+  // Cek apakah token masih ada di wallet (buat live position)
+  if (!exitReason && position.execution_mode === 'live' && position.token_amount_raw) {
+    try {
+      const liveBalance = await fetchLiveTokenBalance(position.mint);
+      if (liveBalance === null || Number(liveBalance) === 0) {
+        console.log(`[position] #${position.id} ${position.mint.slice(0, 8)}... token gone from wallet (balance: ${liveBalance}), auto-closing`);
+        exitReason = 'TOKEN_GONE';
+      } else if (Number(liveBalance) > 0 && !position.token_amount_raw) {
+        // Update actual token amount if we didn't have it
+        db.prepare('UPDATE dry_run_positions SET token_amount_raw = ? WHERE id = ?').run(String(liveBalance), position.id);
+      }
+    } catch (err) {
+      console.log(`[position] #${position.id} balance check failed: ${err.message}`);
+    }
   }
 
   // Time-based LLM exit: position open > 45 min, profit > 5% but below TP → ask LLM
