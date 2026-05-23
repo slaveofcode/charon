@@ -1,7 +1,7 @@
 import { now, json } from '../utils.js';
 import { numSetting, boolSetting } from '../db/settings.js';
 import { db } from '../db/connection.js';
-import { WSOL_MINT, LIVE_MIN_SOL_RESERVE_LAMPORTS } from '../config.js';
+import { WSOL_MINT, LIVE_MIN_SOL_RESERVE_LAMPORTS, JUPITER_SWAP_BASE_URL, JSON_HEADERS, JUPITER_API_KEY } from '../config.js';
 import { escapeHtml, fmtSol } from '../format.js';
 import { executeJupiterSwap, liveWalletBalanceLamports, fetchLiveTokenBalance } from '../liveExecutor.js';
 import { activeStrategy } from '../db/settings.js';
@@ -14,6 +14,56 @@ import { candidateSummary } from '../telegram/format.js';
 import { sendPositionOpen, sendTelegram } from '../telegram/send.js';
 import { updateCandidateStatus } from '../db/candidates.js';
 import { createTradeIntent } from '../db/intents.js';
+import axios from 'axios';
+
+/**
+ * Check if a token can be sold (honeypot detection).
+ * Uses persistent cache to avoid re-checking known honeypots.
+ * Tries to get a Jupiter sell quote — if no route exists, likely a honeypot.
+ * Returns { safe: true } if sell route exists, { safe: false, reason } otherwise.
+ */
+async function checkHoneypot(tokenMint, symbol) {
+  // Check persistent cache first
+  const cached = db.prepare('SELECT reason, hit_count FROM honeypot_cache WHERE mint = ?').get(tokenMint);
+  if (cached) {
+    db.prepare('UPDATE honeypot_cache SET hit_count = hit_count + 1 WHERE mint = ?').run(tokenMint);
+    console.log(`[honeypot] ${symbol} ${tokenMint.slice(0, 8)}... CACHED (${cached.hit_count + 1}x) — ${cached.reason}`);
+    return { safe: false, reason: cached.reason };
+  }
+
+  try {
+    const url = new URL(`${JUPITER_SWAP_BASE_URL.replace(/\/$/, '')}/quote`);
+    url.searchParams.set('inputMint', tokenMint);
+    url.searchParams.set('outputMint', WSOL_MINT);
+    url.searchParams.set('amount', '1000'); // tiny amount raw units
+    url.searchParams.set('slippageBps', '300');
+    const res = await axios.get(url.toString(), {
+      timeout: 10_000,
+      headers: { ...JSON_HEADERS, 'x-api-key': JUPITER_API_KEY },
+    });
+    const quote = res.data;
+    if (!quote || !quote.outAmount || Number(quote.outAmount) <= 0) {
+      return { safe: false, reason: 'Jupiter returned zero output for sell route' };
+    }
+    if (quote.routePlan && quote.routePlan.length === 0) {
+      return { safe: false, reason: 'Jupiter found no sell route (routePlan empty)' };
+    }
+    console.log(`[honeypot] ${symbol} ${tokenMint.slice(0, 8)}... SAFE (sell route exists, outAmount: ${quote.outAmount})`);
+    return { safe: true };
+  } catch (err) {
+    const msg = err.response?.data?.error || err.message || 'unknown error';
+    const isNoRoute = msg.toLowerCase().includes('no route') || msg.toLowerCase().includes('no pool');
+    const reason = isNoRoute
+      ? `No sell route — potential honeypot: ${msg}`
+      : `Sell quote failed: ${msg}`;
+    // Cache flagged tokens to avoid re-checking
+    try {
+      db.prepare('INSERT OR IGNORE INTO honeypot_cache (mint, reason, created_at_ms) VALUES (?, ?, ?)').run(tokenMint, reason, Date.now());
+    } catch { /* cache non-critical */ }
+    console.log(`[honeypot] ${symbol} ${tokenMint.slice(0, 8)}... CACHED — ${reason}`);
+    return { safe: false, reason };
+  }
+}
 
 export async function executeLiveBuy(selectedRow, decision, batchId, rows = [], triggerCandidateId = null) {
   const strat = activeStrategy();
@@ -21,6 +71,16 @@ export async function executeLiveBuy(selectedRow, decision, batchId, rows = [], 
   const balance = await liveWalletBalanceLamports();
   if (balance < amountLamports + LIVE_MIN_SOL_RESERVE_LAMPORTS) {
     throw new Error(`Insufficient SOL balance. Need ${fmtSol((amountLamports + LIVE_MIN_SOL_RESERVE_LAMPORTS) / 1_000_000_000)} SOL including reserve.`);
+  }
+  // Honeypot check: verify sell route exists before buying
+  const hp = await checkHoneypot(selectedRow.candidate.token.mint, selectedRow.candidate.token.symbol);
+  if (!hp.safe) {
+    await sendTelegram([
+      `🚨 <b>Honeypot blocked</b>`,
+      `Token: <a href="https://gmgn.ai/sol/token/${selectedRow.candidate.token.mint}">${escapeHtml(selectedRow.candidate.token.symbol || '?')}</a> (${selectedRow.candidate.token.mint.slice(0, 8)}...)`,
+      `Reason: ${escapeHtml(hp.reason)}`,
+    ].join('\n')).catch(() => {});
+    throw new Error(`Honeypot check failed: ${hp.reason}`);
   }
   const swap = await executeJupiterSwap({
     inputMint: WSOL_MINT,
@@ -83,6 +143,16 @@ export async function executeConfirmedIntent(chatId, intentId) {
     if (balance < amountLamports + LIVE_MIN_SOL_RESERVE_LAMPORTS) {
       db.prepare('UPDATE trade_intents SET status = ?, updated_at_ms = ? WHERE id = ?').run('rejected_insufficient_balance', now(), intentId);
       return bot.sendMessage(chatId, `Insufficient SOL balance. Need ${fmtSol((amountLamports + LIVE_MIN_SOL_RESERVE_LAMPORTS) / 1_000_000_000)} SOL.`, { parse_mode: 'HTML' });
+    }
+    // Honeypot check
+    const hp = await checkHoneypot(freshRow.candidate.token.mint, freshRow.candidate.token.symbol);
+    if (!hp.safe) {
+      db.prepare('UPDATE trade_intents SET status = ?, updated_at_ms = ? WHERE id = ?').run('rejected_honeypot', now(), intentId);
+      return bot.sendMessage(chatId, [
+        '🚨 <b>Honeypot blocked</b>',
+        `Token: <a href="https://gmgn.ai/sol/token/${freshRow.candidate.token.mint}">${escapeHtml(freshRow.candidate.token.symbol || '?')}</a> (${freshRow.candidate.token.mint.slice(0, 8)}...)`,
+        `Reason: ${escapeHtml(hp.reason)}`,
+      ].join('\n'), { parse_mode: 'HTML' });
     }
     const swap = await executeJupiterSwap({
       inputMint: WSOL_MINT,

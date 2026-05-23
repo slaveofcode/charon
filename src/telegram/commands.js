@@ -59,12 +59,12 @@ export async function handleMessage(msg) {
     const [, id, key, ...rest] = parts;
     const value = rest.join(' ');
     if (!id || !key || !value) {
-      return bot.sendMessage(chatId, 'Usage: /stratset <strategy_id> <key> <value>\n\nExample: /stratset sniper tp_percent 75\n\nKeys: tp_percent, sl_percent, position_size_sol, max_open_positions, min_mcap_usd, max_mcap_usd, min_holders, trailing_enabled, trailing_percent, partial_tp, partial_tp_at_percent, partial_tp_sell_percent, max_hold_ms, use_llm, llm_min_confidence, min_source_count, require_fee_claim, min_fee_claim_sol, min_gmgn_total_fee_sol, max_ath_distance_pct');
+      return bot.sendMessage(chatId, 'Usage: /stratset <strategy_id> <key> <value>\\n\\nExample: /stratset sniper tp_percent 75\\n\\nKeys: tp_percent, sl_percent, position_size_sol, max_open_positions, min_mcap_usd, max_mcap_usd, min_holders, trailing_enabled, trailing_percent, partial_tp, partial_tp_at_percent, partial_tp_sell_percent, max_hold_ms, use_llm, llm_min_confidence, min_source_count, require_fee_claim, min_fee_claim_sol, min_gmgn_total_fee_sol, max_ath_distance_pct, max_bot_cluster_size, max_new_wallet_pct, max_dust_wallet_pct, max_uniform_pct, require_smart_wallet');
     }
     const strat = strategyById(id);
     if (!strat) return bot.sendMessage(chatId, `Strategy "${id}" not found.`);
-    const numKeys = new Set(['tp_percent', 'sl_percent', 'position_size_sol', 'max_open_positions', 'min_mcap_usd', 'max_mcap_usd', 'min_holders', 'max_top20_holder_percent', 'trailing_percent', 'partial_tp_at_percent', 'partial_tp_sell_percent', 'max_hold_ms', 'llm_min_confidence', 'min_source_count', 'min_fee_claim_sol', 'min_gmgn_total_fee_sol', 'max_ath_distance_pct', 'token_age_max_ms', 'trending_min_volume_usd', 'trending_min_swaps', 'trending_max_rug_ratio', 'trending_max_bundler_rate', 'min_saved_wallet_holders', 'min_graduated_volume_usd']);
-    const boolKeys = new Set(['trailing_enabled', 'partial_tp', 'use_llm', 'require_fee_claim']);
+    const numKeys = new Set(['tp_percent', 'sl_percent', 'position_size_sol', 'max_open_positions', 'min_mcap_usd', 'max_mcap_usd', 'min_holders', 'max_top20_holder_percent', 'trailing_percent', 'partial_tp_at_percent', 'partial_tp_sell_percent', 'max_hold_ms', 'llm_min_confidence', 'min_source_count', 'min_fee_claim_sol', 'min_gmgn_total_fee_sol', 'max_ath_distance_pct', 'token_age_max_ms', 'trending_min_volume_usd', 'trending_min_swaps', 'trending_max_rug_ratio', 'trending_max_bundler_rate', 'min_saved_wallet_holders', 'min_graduated_volume_usd', 'max_bot_cluster_size', 'max_new_wallet_pct', 'max_dust_wallet_pct', 'max_uniform_pct']);
+    const boolKeys = new Set(['trailing_enabled', 'partial_tp', 'use_llm', 'require_fee_claim', 'require_smart_wallet']);
     const newConfig = { ...strat };
     delete newConfig.id;
     delete newConfig.name;
@@ -107,6 +107,9 @@ export async function handleMessage(msg) {
     return bot.sendMessage(chatId, `Removed ${label}.`);
   }
   if (text.startsWith('/wallets')) return handleCallback({ id: 'manual', data: 'menu:wallets', message: { chat: { id: chatId } } });
+  if (text.startsWith('/wallet ')) return handleWallet(chatId, text.slice(8).trim());
+  if (text.startsWith('/whales ')) return handleWhales(chatId, text.slice(8).trim());
+  if (text.startsWith('/tracked')) return handleTracked(chatId);
   if (text.startsWith('/setfilter')) {
     const { key, value } = parseSetFilter(text);
     const valid = new Set([
@@ -318,6 +321,159 @@ async function sendPnl(chatId, query = null) {
   }
   const text = `📊 <b>PnL</b>\n\n${chunks.join('\n\n')}`;
   return query ? editMenuMessage(query, text, navKeyboard()) : bot.sendMessage(chatId, text, { parse_mode: 'HTML' });
+}
+
+/**
+ * /wallet <address> — Show wallet profile (SOL balance, age, tokens, tracking)
+ */
+async function handleWallet(chatId, address) {
+  if (!address || address.length < 32) {
+    return bot.sendMessage(chatId, 'Usage: /wallet <solana_address>');
+  }
+
+  try {
+    const { walletRiskProfile, walletAgeMs, walletDistinctTokensHeld } = await import('../analysis/walletProfile.js');
+    const { getWalletByAddress, getObservationsByWallet } = await import('../analysis/walletTracker.js');
+
+    const profile = await walletRiskProfile(address);
+    const obs = getObservationsByWallet(address, 5);
+    const tracking = getWalletByAddress(address);
+
+    const lines = [`👤 <b>Wallet: ${escapeHtml(address.slice(0, 8))}...${escapeHtml(address.slice(-4))}</b>`];
+    lines.push('');
+    lines.push(`💰 SOL: <b>${profile.solBalance?.toFixed(4) || '?'} SOL</b>`);
+    lines.push(`⏰ Age: <b>${profile.ageHours != null ? profile.ageHours.toFixed(1) + 'h' : 'unknown'}</b>`);
+    lines.push(`🏷️ Tokens: <b>${profile.distinctTokens ?? '?'}</b>`);
+    lines.push(`📋 Tags: ${profile.tags?.length ? profile.tags.map(t => '#' + t).join(', ') : 'none'}`);
+
+    if (tracking) {
+      const winRate = tracking.total_calls > 0
+        ? (tracking.profitable_calls / tracking.total_calls * 100).toFixed(0)
+        : '?';
+      lines.push('');
+      lines.push(`📊 <b>Tracked Stats</b>`);
+      lines.push(`Calls: ${tracking.total_calls} · Wins: ${tracking.profitable_calls}`);
+      lines.push(`Win Rate: <b>${winRate}%</b> · Avg PnL: ${tracking.total_observed_pnl_percent?.toFixed(1) || '0'}%`);
+      lines.push(`Bot Flag: ${tracking.is_bot_flag ? '🚨 YES' : '✅ No'}`);
+      if (tracking.tags) {
+        const tTags = JSON.parse(tracking.tags || '[]');
+        if (tTags.length) lines.push(`Tags: ${tTags.map(t => '#' + t).join(', ')}`);
+      }
+    }
+
+    if (obs.length) {
+      lines.push('');
+      lines.push(`📝 <b>Recent Observations</b>`);
+      for (const o of obs.slice(0, 3)) {
+        const symbol = o.mint.slice(0, 8);
+        const pnl = o.pnl_percent != null ? ` · ${o.pnl_percent >= 0 ? '+' : ''}${o.pnl_percent.toFixed(1)}%` : '';
+        lines.push(`• ${escapeHtml(symbol)}...${pnl}`);
+      }
+    }
+
+    return bot.sendMessage(chatId, lines.join('\n'), { parse_mode: 'HTML' });
+  } catch (err) {
+    return bot.sendMessage(chatId, `Error fetching wallet: ${escapeHtml(err.message)}`);
+  }
+}
+
+/**
+ * /whales <mint> — Show top 10 holders with wallet analysis
+ */
+async function handleWhales(chatId, mint) {
+  if (!mint) return bot.sendMessage(chatId, 'Usage: /whales <mint_address>');
+
+  try {
+    const { fetchJupiterHolders } = await import('../enrichment/jupiter.js');
+    const { analyzeWalletLayer } = await import('../analysis/analyzeCandidate.js');
+    const { walletRiskProfile } = await import('../analysis/walletProfile.js');
+
+    const holders = await fetchJupiterHolders(mint);
+    if (!holders?.holders?.length) return bot.sendMessage(chatId, 'No holder data found for this mint.');
+
+    const candidate = { token: { mint }, holders };
+    const analysis = await analyzeWalletLayer(candidate);
+
+    const lines = [`🐋 <b>Whale Analysis: ${escapeHtml(mint.slice(0, 8))}...</b>`];
+    lines.push('');
+
+    // Scores
+    if (analysis.passed === false) {
+      lines.push(`🚨 <b>Filtered!</b> ${analysis.failures.join('; ')}`);
+      lines.push('');
+    }
+    lines.push(`📊 <b>Scores</b>`);
+    lines.push(`New wallets: ${analysis.scores.newWalletPct}% · Dust: ${analysis.scores.dustWalletPct}%`);
+    lines.push(`Cluster: ${analysis.scores.clusterLevel} (${analysis.scores.maxClusterSize} wallets)`);
+    lines.push(`Pattern: ${analysis.scores.patternScore.toFixed(0)}/100 · Smart wallets: ${analysis.scores.provenWalletCount}`);
+    lines.push('');
+
+    // Top 5 holders
+    lines.push(`👥 <b>Top 5 Holders</b>`);
+    const profiles = analysis.details.profiles?.slice(0, 5) || [];
+    for (let i = 0; i < Math.min(5, holders.holders.length); i++) {
+      const h = holders.holders[i];
+      const p = profiles.find(pf => h.address.startsWith(pf.address.split('...')[0])) || {};
+      const tagStr = p.tags?.length ? ` [${p.tags.join(',')}]` : '';
+      const pct = h.percent != null ? `${h.percent.toFixed(1)}%` : '?%';
+      lines.push(`${i + 1}. <a href="https://solscan.io/account/${h.address}">${escapeHtml(h.address.slice(0, 8))}...</a> ${pct}${tagStr}`);
+    }
+
+    // Tokens they hold
+    lines.push('');
+    lines.push(`Total holders: ${holders.count}`);
+    lines.push(`Top 20 hold: ${holders.top20Percent?.toFixed(1) || '?'}%`);
+
+    return bot.sendMessage(chatId, lines.join('\n'), {
+      parse_mode: 'HTML',
+      disable_web_page_preview: true,
+    });
+  } catch (err) {
+    return bot.sendMessage(chatId, `Error: ${escapeHtml(err.message)}`);
+  }
+}
+
+/**
+ * /tracked — List tracked smart wallets
+ */
+async function handleTracked(chatId) {
+  try {
+    const { getProvenWallets, getWalletByAddress } = await import('../analysis/walletTracker.js');
+    const proven = getProvenWallets();
+    const allWallets = db.prepare('SELECT * FROM wallet_tracking ORDER BY total_calls DESC LIMIT 20').all();
+
+    if (!allWallets.length) {
+      return bot.sendMessage(chatId, '📭 No wallets tracked yet. Wallets are tracked automatically as candidate tokens are analyzed.');
+    }
+
+    const lines = ['📋 <b>Tracked Wallets</b>'];
+    lines.push('');
+
+    if (proven.length) {
+      lines.push(`⭐ <b>Proven Smart Wallets (${proven.length})</b>`);
+      for (const w of proven.slice(0, 10)) {
+        const wr = w.total_calls > 0 ? (w.profitable_calls / w.total_calls * 100).toFixed(0) : '?';
+        lines.push(`• <a href="https://solscan.io/account/${w.address}">${escapeHtml(w.address.slice(0, 8))}...</a> <b>${wr}%</b> win (${w.total_calls} calls, ${w.profitable_calls} wins)`);
+      }
+      lines.push('');
+    }
+
+    lines.push(`📊 <b>All Tracked</b>`);
+    for (const w of allWallets) {
+      const wr = w.total_calls > 0 ? (w.profitable_calls / w.total_calls * 100).toFixed(0) : '?';
+      const tags = JSON.parse(w.tags || '[]');
+      const tagStr = tags.length ? ` [${tags.join(',')}]` : '';
+      const botStr = w.is_bot_flag ? ' 🚨' : '';
+      lines.push(`• <a href="https://solscan.io/account/${w.address}">${escapeHtml(w.address.slice(0, 8))}...</a> ${wr}%${botStr}${tagStr}`);
+    }
+
+    return bot.sendMessage(chatId, lines.join('\n'), {
+      parse_mode: 'HTML',
+      disable_web_page_preview: true,
+    });
+  } catch (err) {
+    return bot.sendMessage(chatId, `Error: ${escapeHtml(err.message)}`);
+  }
 }
 
 function parseSetFilter(text) {

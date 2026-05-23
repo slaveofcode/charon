@@ -198,6 +198,39 @@ export function initDb() {
       triggered_at_ms INTEGER,
       expires_at_ms INTEGER NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS honeypot_cache (
+      mint TEXT PRIMARY KEY,
+      reason TEXT NOT NULL,
+      created_at_ms INTEGER NOT NULL,
+      hit_count INTEGER NOT NULL DEFAULT 1
+    );
+    CREATE TABLE IF NOT EXISTS wallet_tracking (
+      address TEXT PRIMARY KEY,
+      first_seen_ms INTEGER NOT NULL,
+      last_seen_ms INTEGER NOT NULL,
+      total_calls INTEGER NOT NULL DEFAULT 0,
+      profitable_calls INTEGER NOT NULL DEFAULT 0,
+      total_observed_pnl_percent REAL NOT NULL DEFAULT 0,
+      avg_position_ms REAL NOT NULL DEFAULT 0,
+      is_bot_flag INTEGER NOT NULL DEFAULT 0,
+      tags TEXT NOT NULL DEFAULT '[]'
+    );
+    CREATE TABLE IF NOT EXISTS wallet_observations (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      wallet_address TEXT NOT NULL,
+      mint TEXT NOT NULL,
+      position_id INTEGER,
+      observed_at_ms INTEGER NOT NULL,
+      entry_price REAL,
+      entry_mcap REAL,
+      holder_pct REAL,
+      exit_price REAL,
+      exit_mcap REAL,
+      pnl_percent REAL,
+      held_duration_ms REAL,
+      tags TEXT NOT NULL DEFAULT '[]',
+      UNIQUE(wallet_address, mint)
+    );
     CREATE INDEX IF NOT EXISTS idx_alerts_status ON price_alerts(status, expires_at_ms);
     CREATE INDEX IF NOT EXISTS idx_candidates_mint ON candidates(mint);
     CREATE INDEX IF NOT EXISTS idx_positions_status ON dry_run_positions(status);
@@ -205,6 +238,8 @@ export function initDb() {
     CREATE INDEX IF NOT EXISTS idx_decision_logs_mint ON decision_logs(selected_mint);
     CREATE INDEX IF NOT EXISTS idx_signal_events_mint ON signal_events(mint);
     CREATE INDEX IF NOT EXISTS idx_learning_lessons_status ON learning_lessons(status, created_at_ms);
+    CREATE INDEX IF NOT EXISTS idx_wallet_obs_wallet ON wallet_observations(wallet_address);
+    CREATE INDEX IF NOT EXISTS idx_wallet_obs_mint ON wallet_observations(mint);
   `);
   } catch (err) {
     console.error('[db] Failed to create tables:', err.message);
@@ -233,6 +268,7 @@ export function initDb() {
     llm_candidate_pick_count: process.env.LLM_CANDIDATE_PICK_COUNT || '10',
     llm_candidate_max_age_ms: process.env.LLM_CANDIDATE_MAX_AGE_MS || String(10 * 60 * 1000),
     llm_min_confidence: '75',
+    llm_max_lessons: process.env.LLM_MAX_LESSONS || '12',
     max_open_positions: process.env.MAX_OPEN_POSITIONS || '3',
     dry_run_buy_sol: '0.1',
     default_tp_percent: '50',
@@ -258,6 +294,9 @@ export function initDb() {
     trending_min_swaps: process.env.TRENDING_MIN_SWAPS || '0',
     trending_max_rug_ratio: process.env.TRENDING_MAX_RUG_RATIO || '0.3',
     trending_max_bundler_rate: process.env.TRENDING_MAX_BUNDLER_RATE || '0.5',
+    time_exit_min_age: process.env.TIME_EXIT_MIN_AGE || '45',
+    time_exit_min_profit: process.env.TIME_EXIT_MIN_PROFIT || '5',
+    position_heartbeat_ms: process.env.POSITION_HEARTBEAT_MS || '180000',
   };
     const insert = db.prepare('INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)');
     for (const [key, value] of Object.entries(defaults)) insert.run(key, value);
@@ -301,6 +340,11 @@ export function initDb() {
     max_hold_ms: 0,
     use_llm: true,
     llm_min_confidence: 50,
+    max_bot_cluster_size: 3,
+    max_new_wallet_pct: 50,
+    max_dust_wallet_pct: 30,
+    max_uniform_pct: 40,
+    require_smart_wallet: false,
   }), ts);
 
   stratInsert.run('dip_buy', 'Dip Buy', 0, JSON.stringify({
@@ -322,17 +366,22 @@ export function initDb() {
     trending_max_rug_ratio: 0.3,
     trending_max_bundler_rate: 0.5,
     position_size_sol: 0.05,
-    max_open_positions: 3,
+    max_open_positions: 4,
     tp_percent: 30,
-    sl_percent: -20,
+    sl_percent: -15,
     trailing_enabled: true,
     trailing_percent: 15,
     partial_tp: false,
     partial_tp_at_percent: 0,
     partial_tp_sell_percent: 0,
-    max_hold_ms: 0,
+    max_hold_ms: 7200000,
     use_llm: true,
-    llm_min_confidence: 60,
+    llm_min_confidence: 80,
+    max_bot_cluster_size: 3,
+    max_new_wallet_pct: 50,
+    max_dust_wallet_pct: 30,
+    max_uniform_pct: 40,
+    require_smart_wallet: false,
   }), ts);
 
   stratInsert.run('smart_money', 'Smart Money', 0, JSON.stringify({
@@ -365,6 +414,11 @@ export function initDb() {
     max_hold_ms: 0,
     use_llm: true,
     llm_min_confidence: 70,
+    max_bot_cluster_size: 3,
+    max_new_wallet_pct: 40,
+    max_dust_wallet_pct: 20,
+    max_uniform_pct: 30,
+    require_smart_wallet: false,
   }), ts);
 
   stratInsert.run('degen', 'Degen', 0, JSON.stringify({
@@ -397,6 +451,11 @@ export function initDb() {
     max_hold_ms: 0,
     use_llm: false,
     llm_min_confidence: 0,
+    max_bot_cluster_size: 5,
+    max_new_wallet_pct: 60,
+    max_dust_wallet_pct: 40,
+    max_uniform_pct: 50,
+    require_smart_wallet: false,
   }), ts);
   } catch (err) {
     console.error('[db] Failed to seed strategies:', err.message);

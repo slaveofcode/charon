@@ -5,6 +5,7 @@ import { fetchJupiterAsset, fetchJupiterHolders, fetchJupiterChartContext } from
 import { fetchSavedWalletExposure } from '../enrichment/wallets.js';
 import { fetchTwitterNarrative } from '../enrichment/twitter.js';
 import { gmgnLink } from '../format.js';
+import { analyzeWalletLayer } from '../analysis/analyzeCandidate.js';
 
 export function buildFeeSnapshot(fee, signature) {
   return {
@@ -50,6 +51,12 @@ export function filterCandidate(candidate) {
     }
   } else if (strat.require_fee_claim) {
     failures.push('fee claim: missing (required by strategy)');
+  }
+
+  // Liquidity depth check — prevent entry into shallow pools
+  const liq = candidate.metrics.liquidityUsd;
+  if (strat.min_liquidity_usd > 0 && liq < strat.min_liquidity_usd) {
+    failures.push(`liquidity: $${liq} < $${strat.min_liquidity_usd}`);
   }
 
   // Market cap checks
@@ -187,5 +194,26 @@ export async function buildCandidate({ mint, fee = null, signature = null, gradu
     createdAtMs: now(),
   };
   candidate.filters = filterCandidate(candidate);
+
+  // Run wallet & bot analysis (async, non-blocking for core flow)
+  try {
+    candidate.walletAnalysis = await analyzeWalletLayer(candidate, strat);
+    // Only add to filter failures if initial filters passed
+    if (candidate.filters.passed && !candidate.walletAnalysis.passed) {
+      candidate.filters = {
+        passed: false,
+        failures: candidate.walletAnalysis.failures,
+        strategy: candidate.filters.strategy,
+      };
+    }
+  } catch (err) {
+    candidate.walletAnalysis = {
+      passed: true,
+      warnings: [`Wallet analysis failed: ${err.message}`],
+      scores: {},
+      details: {},
+    };
+  }
+
   return candidate;
 }

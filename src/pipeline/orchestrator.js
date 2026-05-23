@@ -1,4 +1,4 @@
-import { now, pruneSeen } from '../utils.js';
+import { now, pruneSeen, sleep } from '../utils.js';
 import { numSetting, boolSetting } from '../db/settings.js';
 import { upsertCandidate, updateCandidateStatus, recentEligibleCandidates, candidateById } from '../db/candidates.js';
 import { storeDecision, storeBatchDecision, logDecisionEvent } from '../db/decisions.js';
@@ -142,7 +142,7 @@ export async function processCandidateFromSignals(signals) {
 
     if (batchId) await sendBatchReveal(batchId, rows, batchDecision, candidateId);
 
-    if (selectedRow && boolSetting('agent_enabled', true) && batchDecision.verdict === 'BUY' && batchDecision.confidence >= numSetting('llm_min_confidence', 75)) {
+    if (selectedRow && boolSetting('agent_enabled', true) && batchDecision.verdict === 'BUY' && batchDecision.confidence >= numSetting('llm_min_confidence', 85)) {
       if (!canOpenMorePositions()) {
         const max = numSetting('max_open_positions', 3);
         console.log(`[agent] max open positions reached (${openPositionCount()}/${max}), skipping buy ${selectedRow.candidate.token.mint}`);
@@ -242,30 +242,50 @@ export async function handleApprovedBuy(selectedRow, decision, batchId, rows = [
     return;
   }
 
-  try {
-    await executeLiveBuy(freshSelectedRow, decision, batchId, executionRows, triggerCandidateId);
-  } catch (err) {
-    const intentId = createTradeIntent(freshSelectedRow.id, freshSelectedRow.candidate, decision, mode, 'execution_failed');
-    logDecisionEvent({
-      batchId,
-      triggerCandidateId,
-      selectedRow: freshSelectedRow,
-      rows: executionRows,
-      decision,
-      mode,
-      action: 'live_entry_failed',
-      guardrails: { maxOpenPositions: numSetting('max_open_positions', 3), openPositions: openPositionCount() },
-      execution: { intentId, error: err.message },
-    });
-    await sendTelegram([
-      '🛑 <b>Live trade failed</b>',
-      '',
-      candidateSummary(freshSelectedRow.candidate, decision),
-      '',
-      `Intent #${intentId} stored.`,
-      `Error: ${escapeHtml(err.message)}`,
-    ].join('\n'));
+  // LIVE: try execution with retry and fallback
+  let lastError = null;
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    try {
+      await executeLiveBuy(freshSelectedRow, decision, batchId, executionRows, triggerCandidateId);
+      return; // success
+    } catch (err) {
+      lastError = err;
+      // Retryable: network errors, swap failures, rate limits
+      const isRetryable = err.message && !err.message.includes('Honeypot') && !err.message.includes('Insufficient SOL');
+      if (attempt === 1 && isRetryable) {
+        console.log(`[agent] live buy attempt #1 failed: ${err.message.slice(0, 100)} — retrying in 10s`);
+        await sleep(10_000);
+        if (!canOpenMorePositions()) {
+          console.log(`[agent] retry skipped — max positions reached`);
+          break;
+        }
+        continue;
+      }
+      break;
+    }
   }
+
+  // All attempts failed — log and create failed intent
+  const intentId = createTradeIntent(freshSelectedRow.id, freshSelectedRow.candidate, decision, mode, 'execution_failed');
+  logDecisionEvent({
+    batchId,
+    triggerCandidateId,
+    selectedRow: freshSelectedRow,
+    rows: executionRows,
+    decision,
+    mode,
+    action: 'live_entry_failed',
+    guardrails: { maxOpenPositions: numSetting('max_open_positions', 3), openPositions: openPositionCount() },
+    execution: { intentId, error: lastError?.message },
+  });
+  await sendTelegram([
+    '🛑 <b>Live trade failed</b>',
+    '',
+    candidateSummary(freshSelectedRow.candidate, decision),
+    '',
+    `Intent #${intentId} stored.`,
+    `Error: ${escapeHtml(lastError?.message || 'unknown')}`,
+  ].join('\n'));
 }
 
 export async function maybeProcessDegenCandidate(mint, trendingToken) {

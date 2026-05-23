@@ -15,7 +15,9 @@
     "better-sqlite3": "^12.9.0",
     "bs58": "^6.0.0",
     "dotenv": "^16.4.7",
+    "https-proxy-agent": "^9.0.0",
     "node-telegram-bot-api": "^0.66.0",
+    "undici": "^8.3.0",
     "ws": "^8.18.0"
   }
 }

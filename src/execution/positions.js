@@ -1,7 +1,6 @@
-import { now, json } from '../utils.js';
+import { now, json, firstPositiveNumber, marketCapFromGmgn, tokenPriceFromGmgn } from '../utils.js';
 import { numSetting, boolSetting, strategyById } from '../db/settings.js';
 import { db } from '../db/connection.js';
-import { firstPositiveNumber, marketCapFromGmgn, tokenPriceFromGmgn } from '../utils.js';
 import { fetchGmgnTokenInfo } from '../enrichment/gmgn.js';
 import { fetchJupiterAsset, fetchJupiterHolders, fetchJupiterChartContext, fetchJupiterWalletPnl } from '../enrichment/jupiter.js';
 import { liveWalletPubkey } from '../liveExecutor.js';
@@ -14,6 +13,7 @@ import { executeLiveSell } from './router.js';
 import { sendTelegram } from '../telegram/send.js';
 import { decideTimeExit } from '../pipeline/llm.js';
 import { fetchLiveTokenBalance } from '../liveExecutor.js';
+import { escapeHtml, gmgnLink } from '../format.js';
 
 export async function freshEntryMarket(mint, candidate) {
   const gmgn = await fetchGmgnTokenInfo(mint, false);
@@ -164,7 +164,8 @@ export async function refreshPosition(position, { autoExit = true, jupiterPnl = 
     }
   }
 
-  // Standard exit checks
+  // Standard exit checks — for dry-run, check exits and auto-close to collect lesson data
+  // (dry-run positions are simulated, so closing them is safe and generates learning data)
   if (!exitReason) {
     if (slHit) exitReason = 'SL';
     else if (tpHit && !position.trailing_enabled) exitReason = 'TP';
@@ -188,11 +189,11 @@ export async function refreshPosition(position, { autoExit = true, jupiterPnl = 
     }
   }
 
-  // Time-based LLM exit: position open > 45 min, profit > 5% but below TP → ask LLM
+  // Time-based LLM exit: position open > N min, profit > N% but below TP → ask LLM
   if (!exitReason && position.execution_mode === 'live') {
     const ageMin = (now() - position.opened_at_ms) / 60000;
-    const minProfit = 5;
-    const minAge = 45;
+    const minProfit = numSetting('time_exit_min_profit', 5);
+    const minAge = numSetting('time_exit_min_age', 45);
     if (ageMin >= minAge && pnlPercent >= minProfit && pnlPercent < Number(position.tp_percent)) {
       try {
         // Fetch extra token context for LLM decision
@@ -245,7 +246,7 @@ export async function refreshPosition(position, { autoExit = true, jupiterPnl = 
       VALUES (?, ?, 'sell', ?, ?, ?, ?, ?, ?, ?)
     `).run(position.id, position.mint, now(), price, mcap, position.size_sol, position.token_amount_est, exitReason, json({ pnlPercent: finalPnlPercent, pnlSol: finalPnlSol, receivedSol: receivedSol ?? null, sell }));
     closed = true;
-  } else if (exitReason && autoExit) {
+  } else  if (exitReason && autoExit) {
     db.prepare(`
       UPDATE dry_run_positions
       SET status = 'closed', closed_at_ms = ?, exit_price = ?, exit_mcap = ?, exit_reason = ?, pnl_percent = ?, pnl_sol = ?
@@ -256,6 +257,17 @@ export async function refreshPosition(position, { autoExit = true, jupiterPnl = 
       VALUES (?, ?, 'sell', ?, ?, ?, ?, ?, ?, ?)
     `).run(position.id, position.mint, now(), price, mcap, position.size_sol, position.token_amount_est, exitReason, json({ pnlPercent, pnlSol }));
     closed = true;
+  }
+
+  // Update wallet observations on position close
+  if (closed) {
+    try {
+      const { updateWalletObservationOnClose } = await import('../analysis/walletTracker.js');
+      updateWalletObservationOnClose(position.id, price, mcap, position.execution_mode === 'live' ? finalPnlPercent : pnlPercent);
+    } catch (err) {
+      // Non-critical — don't break position close
+      console.log(`[walletTrack] update failed for #${position.id}: ${err.message}`);
+    }
   }
   return {
     ...position,
@@ -287,8 +299,8 @@ export async function monitorPositions() {
     console.log(`[position] ${nowStr} monitoring: ${positionIds}`);
   }
 
-  // Heartbeat ke Telegram tiap 5 menit
-  const HEARTBEAT_INTERVAL_MS = 3 * 60 * 1000;
+  // Heartbeat ke Telegram — interval dari setting
+  const HEARTBEAT_INTERVAL_MS = numSetting('position_heartbeat_ms', 180000);
   const sinceHeartbeat = now() - (lastTelegramHeartbeat || 0);
   if (sinceHeartbeat >= HEARTBEAT_INTERVAL_MS && open.length > 0) {
     const lines = [];
@@ -302,7 +314,8 @@ export async function monitorPositions() {
       const unrealizedSol = Number(p.size_sol || 0) * unrealizedPct / 100;
       const emoji = unrealizedPct >= Number(p.tp_percent) ? '🟢' : unrealizedPct <= Number(p.sl_percent) ? '🔴' : '🟡';
       const slLabel = Number(p.sl_percent) >= 0 ? `${p.sl_percent}% SL` : `SL ${p.sl_percent}%`;
-      lines.push(`${emoji} <b>${symbol}</b> #${p.id} TP:${p.tp_percent}% ` +
+      const tokenLink = `<a href="${gmgnLink(p.mint)}">${escapeHtml(symbol)}</a>`;
+      lines.push(`${emoji} ${tokenLink} #${p.id} TP:${p.tp_percent}% ` +
         `${slLabel} | PnL: <b>${unrealizedPct >= 0 ? '+' : ''}${unrealizedPct.toFixed(2)}%</b> (${unrealizedSol >= 0 ? '+' : ''}${unrealizedSol.toFixed(4)} SOL)`);
     }
     sendTelegram(`⏱ <b>Position Monitor</b> ${nowStr}\n${lines.join('\n')}`).catch(() => {});

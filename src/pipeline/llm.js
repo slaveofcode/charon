@@ -1,8 +1,9 @@
 import axios from 'axios';
 import { ENABLE_LLM, LLM_API_KEY, LLM_BASE_URL, LLM_MODEL, LLM_TIMEOUT_MS } from '../config.js';
-import { now, stripThinking, strictJsonFromText } from '../utils.js';
-import { numSetting } from '../db/settings.js';
+import { now, json, stripThinking, strictJsonFromText } from '../utils.js';
+import { fmtPct } from '../format.js';
 import { db } from '../db/connection.js';
+import { numSetting } from '../db/settings.js';
 
 export function normalizeDecision(parsed, fallbackReason = '') {
   const verdict = ['BUY', 'WATCH', 'PASS'].includes(String(parsed?.verdict).toUpperCase())
@@ -19,7 +20,8 @@ export function normalizeDecision(parsed, fallbackReason = '') {
   };
 }
 
-export function activeLessonsForPrompt(limit = 6) {
+export function activeLessonsForPrompt(limit) {
+  limit = limit ?? numSetting('llm_max_lessons', 12);
   return db.prepare(`
     SELECT lesson
     FROM learning_lessons
@@ -61,6 +63,26 @@ export function compactCandidateForLlm(row) {
     },
     savedWalletExposure: c.savedWalletExposure,
     twitterNarrative: c.twitterNarrative,
+    walletAnalysis: c.walletAnalysis ? {
+      newWalletPct: c.walletAnalysis.scores.newWalletPct,
+      dustWalletPct: c.walletAnalysis.scores.dustWalletPct,
+      clusterDetected: c.walletAnalysis.scores.clusterLevel === 'cluster' || c.walletAnalysis.scores.clusterLevel === 'bot_army',
+      clusterLevel: c.walletAnalysis.scores.clusterLevel,
+      clusterSize: c.walletAnalysis.scores.maxClusterSize,
+      patternFlagged: c.walletAnalysis.scores.patternFlagged,
+      patternScore: c.walletAnalysis.scores.patternScore,
+      uniformPct: c.walletAnalysis.scores.uniformPct,
+      haveSmartWallet: c.walletAnalysis.scores.haveSmartWallet,
+      provenWalletCount: c.walletAnalysis.scores.provenWalletCount,
+      topProfiles: c.walletAnalysis.details.profiles?.slice(0, 5).map(p => ({
+        addr: p.address,
+        sol: p.solBalance?.toFixed(3),
+        ageH: p.ageHours,
+        new: p.isNew,
+        dust: p.isDust,
+        tags: p.tags,
+      })),
+    } : null,
     filters: c.filters,
   };
 }
