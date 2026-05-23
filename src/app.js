@@ -37,6 +37,10 @@ export async function startCharon() {
     setInterval(() => trackDip(() => monitorPriceAlerts()), 10_000);
     setInterval(() => cleanupAlerts(), 60 * 60 * 1000);
 
+    // GMGN trending discovery — poll market rank for pump.fun tokens
+    const { startGmgnDiscovery } = await import('./signals/gmgnDiscovery.js');
+    startGmgnDiscovery();
+
     console.log(`[bot] ${APP_NAME} started (server mode: ${SIGNAL_SERVER_URL})`);
   } else {
     // ── Standalone mode: direct polling (legacy) ───────────────────────────

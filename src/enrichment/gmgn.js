@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { GMGN_API_KEY, GMGN_CACHE_TTL_MS, GMGN_ENABLED, JSON_HEADERS } from '../config.js';
+import { GMGN_API_KEY, GMGN_CACHE_TTL_MS, GMGN_ENABLED, GMGN_PROXY_URL, JSON_HEADERS } from '../config.js';
 import { now, sleep } from '../utils.js';
 import { numSetting, setting } from '../db/settings.js';
 
@@ -12,6 +12,21 @@ const gmgnBackoff = {
   trendingUntil: 0,
   trendingReason: '',
 };
+
+// Proxy agent for residential proxy (bypass Cloudflare)
+let proxyDispatcher = null;
+async function getProxyDispatcher() {
+  if (!GMGN_PROXY_URL) return null;
+  if (proxyDispatcher) return proxyDispatcher;
+  try {
+    const { ProxyAgent } = await import('undici');
+    proxyDispatcher = new ProxyAgent(GMGN_PROXY_URL);
+    console.log(`[gmgn] proxy configured: ${GMGN_PROXY_URL.replace(/\/\/.*@/, '//****:****@')}`);
+  } catch (err) {
+    console.log(`[gmgn] proxy init failed: ${err.message}`);
+  }
+  return proxyDispatcher;
+}
 
 async function paceGmgnRequest() {
   const delayMs = Math.max(0, numSetting('gmgn_request_delay_ms', 2500));
@@ -57,39 +72,53 @@ async function gmgnFetch(pathname, { params = {} } = {}) {
       timestamp: Math.floor(now() / 1000),
       client_id: randomUUID(),
     });
+    console.log(`[gmgn] fetch ${url.toString().slice(0, 350)}`);
+    const dispatcher = await getProxyDispatcher();
     const maxRetries = Math.max(0, Math.floor(numSetting('gmgn_max_retries', 2)));
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
       await paceGmgnRequest();
-      const res = await fetch(url, {
-        method: 'GET',
-        headers: {
-          'X-APIKEY': GMGN_API_KEY,
-          'Content-Type': 'application/json',
-        },
-      });
-      const text = await res.text().catch(() => '');
-      let payload = {};
+      const controller = new AbortController();
+      const timeoutTimer = setTimeout(() => controller.abort(), 15_000);
       try {
-        payload = text ? JSON.parse(text) : {};
-      } catch {
-        payload = { raw: text };
+        const fetchOpts = {
+          method: 'GET',
+          headers: {
+            'X-APIKEY': GMGN_API_KEY,
+            'Content-Type': 'application/json',
+          },
+        };
+        if (dispatcher) fetchOpts.dispatcher = dispatcher;
+        const res = await fetch(url, { ...fetchOpts, signal: controller.signal });
+        clearTimeout(timeoutTimer);
+        const text = await res.text().catch(() => '');
+        let payload = {};
+        try {
+          payload = text ? JSON.parse(text) : {};
+        } catch {
+          payload = { raw: text };
+        }
+        if (res.ok) return payload;
+        const message = gmgnErrorText(res.status, payload, `GMGN ${pathname} ${res.status}`);
+        const rateLimited = res.status === 429 || /rate limit|temporarily banned/i.test(String(message));
+        if (rateLimited && attempt < maxRetries) {
+          const retryAfter = Number(res.headers.get('retry-after'));
+          const backoffMs = Number.isFinite(retryAfter)
+            ? retryAfter * 1000
+            : /temporarily banned/i.test(String(message))
+              ? 60_000
+              : Math.min(30_000, 3000 * 2 ** attempt);
+          await sleep(backoffMs);
+          continue;
+        }
+        const error = new Error(message);
+        error.response = { status: res.status, data: payload, headers: Object.fromEntries(res.headers.entries()) };
+        throw error;
+      } catch (err) {
+        clearTimeout(timeoutTimer);
+        // AbortError (timeout) — throw directly (no retry for timeouts)
+        if (err.name === 'AbortError') throw new Error(`GMGN ${pathname} timeout after 15s`);
+        throw err;
       }
-      if (res.ok) return payload;
-      const message = gmgnErrorText(res.status, payload, `GMGN ${pathname} ${res.status}`);
-      const rateLimited = res.status === 429 || /rate limit|temporarily banned/i.test(String(message));
-      if (rateLimited && attempt < maxRetries) {
-        const retryAfter = Number(res.headers.get('retry-after'));
-        const backoffMs = Number.isFinite(retryAfter)
-          ? retryAfter * 1000
-          : /temporarily banned/i.test(String(message))
-            ? 60_000
-            : Math.min(30_000, 3000 * 2 ** attempt);
-        await sleep(backoffMs);
-        continue;
-      }
-      const error = new Error(message);
-      error.response = { status: res.status, data: payload, headers: Object.fromEntries(res.headers.entries()) };
-      throw error;
     }
     throw new Error(`GMGN ${pathname} failed`);
   });
