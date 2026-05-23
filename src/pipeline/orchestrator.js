@@ -21,13 +21,13 @@ export const seenSignalCandidates = new Map();
 
 // Cache of recently-filtered tokens to avoid re-checking the same dead tokens
 // Key: mint address, Value: timestamp. Pruned after FILTERED_TTL_MS.
-const FILTERED_TTL_MS = 60 * 60 * 1000; // 1 hour
+const FILTERED_TTL_MS = 30 * 60 * 1000; // 30 minutes
 const recentlyFilteredTokens = new Map();
 
 // Cross-source dedup: track ALL mints processed (filtered or not) within TTL
 // so a token from signal server isn't reprocessed when GMGN discovery finds it.
 // Key: mint address, Value: timestamp.
-const PROCESSED_TTL_MS = 60 * 60 * 1000; // 1 hour
+const PROCESSED_TTL_MS = 30 * 60 * 1000; // 30 minutes
 const processedTokens = new Map();
 
 // In-flight lock to prevent parallel processing of the same mint from
