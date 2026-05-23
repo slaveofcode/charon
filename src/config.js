@@ -18,6 +18,7 @@ export const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
 export const TELEGRAM_TOPIC_ID = process.env.TELEGRAM_TOPIC_ID;
 export const HELIUS_API_KEY = process.env.HELIUS_API_KEY;
 export const GMGN_API_KEY = process.env.GMGN_API_KEY;
+export const GMGN_PROXY_URL = process.env.GMGN_PROXY_URL || '';
 export const GMGN_ENABLED = process.env.GMGN_ENABLED !== 'false';
 export const JUPITER_API_KEY = process.env.JUPITER_API_KEY || 'jup_d9fefba2caabab4065b910464b32c86074210858b28addcb07f75ab97e05290f';
 export const SOLANA_PRIVATE_KEY = process.env.SOLANA_PRIVATE_KEY || process.env.PRIVATE_KEY || '';

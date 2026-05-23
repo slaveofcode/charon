@@ -4,8 +4,15 @@ import { DB_PATH } from '../config.js';
 export const db = new Database(DB_PATH);
 
 export function initDb() {
-  db.pragma('journal_mode = WAL');
-  db.exec(`
+  try {
+    db.pragma('journal_mode = WAL');
+  } catch (err) {
+    console.error('[db] Failed to set WAL mode:', err.message);
+    throw new Error(`Database initialization failed: ${err.message}`);
+  }
+
+  try {
+    db.exec(`
     CREATE TABLE IF NOT EXISTS settings (
       key TEXT PRIMARY KEY,
       value TEXT NOT NULL
@@ -199,7 +206,13 @@ export function initDb() {
     CREATE INDEX IF NOT EXISTS idx_signal_events_mint ON signal_events(mint);
     CREATE INDEX IF NOT EXISTS idx_learning_lessons_status ON learning_lessons(status, created_at_ms);
   `);
-  ensureColumn('candidates', 'signal_key', 'TEXT');
+  } catch (err) {
+    console.error('[db] Failed to create tables:', err.message);
+    throw new Error(`Database schema creation failed: ${err.message}`);
+  }
+
+  try {
+    ensureColumn('candidates', 'signal_key', 'TEXT');
   db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_candidates_signal_key ON candidates(signal_key) WHERE signal_key IS NOT NULL');
   ensureColumn('dry_run_positions', 'execution_mode', "TEXT DEFAULT 'dry_run'");
   ensureColumn('dry_run_positions', 'entry_signature', 'TEXT');
@@ -208,8 +221,13 @@ export function initDb() {
   ensureColumn('dry_run_positions', 'strategy_id', "TEXT DEFAULT 'sniper'");
   ensureColumn('dry_run_positions', 'partial_tp_done', 'INTEGER DEFAULT 0');
   ensureColumn('decision_logs', 'strategy_id', 'TEXT');
+  } catch (err) {
+    console.error('[db] Failed to add columns:', err.message);
+    throw new Error(`Database column migration failed: ${err.message}`);
+  }
 
-  const defaults = {
+  try {
+    const defaults = {
     agent_enabled: 'true',
     trading_mode: process.env.TRADING_MODE || 'dry_run',
     llm_candidate_pick_count: process.env.LLM_CANDIDATE_PICK_COUNT || '10',
@@ -241,10 +259,15 @@ export function initDb() {
     trending_max_rug_ratio: process.env.TRENDING_MAX_RUG_RATIO || '0.3',
     trending_max_bundler_rate: process.env.TRENDING_MAX_BUNDLER_RATE || '0.5',
   };
-  const insert = db.prepare('INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)');
-  for (const [key, value] of Object.entries(defaults)) insert.run(key, value);
+    const insert = db.prepare('INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)');
+    for (const [key, value] of Object.entries(defaults)) insert.run(key, value);
+  } catch (err) {
+    console.error('[db] Failed to set default settings:', err.message);
+    throw new Error(`Database defaults initialization failed: ${err.message}`);
+  }
 
-  // Seed default strategies
+  try {
+    // Seed default strategies
   const stratInsert = db.prepare('INSERT OR IGNORE INTO strategies (id, name, enabled, config_json, created_at_ms) VALUES (?, ?, ?, ?, ?)');
   const ts = Date.now();
 
@@ -375,6 +398,12 @@ export function initDb() {
     use_llm: false,
     llm_min_confidence: 0,
   }), ts);
+  } catch (err) {
+    console.error('[db] Failed to seed strategies:', err.message);
+    throw new Error(`Database strategy seeding failed: ${err.message}`);
+  }
+
+  console.log('[db] Initialization completed successfully');
 }
 
 export function ensureColumn(table, column, ddl) {

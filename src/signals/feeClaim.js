@@ -9,9 +9,26 @@ import { buildFeeSnapshot } from '../pipeline/candidateBuilder.js';
 
 export const seenFeeClaims = new Map();
 let candidateHandler = null;
+let wsInstance = null;
+let wsPingTimer = null;
 
 export function setCandidateHandler(fn) {
   candidateHandler = fn;
+}
+
+export function stopWebsocket() {
+  if (wsPingTimer) {
+    clearInterval(wsPingTimer);
+    wsPingTimer = null;
+  }
+  if (wsInstance) {
+    wsInstance.removeAllListeners();
+    if (wsInstance.readyState === WebSocket.OPEN || wsInstance.readyState === WebSocket.CONNECTING) {
+      wsInstance.close();
+    }
+    wsInstance = null;
+  }
+  console.log('[ws] stopped');
 }
 
 export async function handleFeeClaim(fee, signature) {
@@ -64,26 +81,42 @@ async function processLog(logInfo) {
 }
 
 export function startWebsocket() {
+  // Prevent multiple instances
+  if (wsInstance) {
+    console.log('[ws] already running');
+    return;
+  }
+
   const wsUrl = SOLANA_WS_URL;
-  let ws;
-  let pingTimer;
   function connect() {
-    ws = new WebSocket(wsUrl);
-    ws.on('open', () => {
+    // Clean up existing instance before reconnecting
+    if (wsInstance) {
+      wsInstance.removeAllListeners();
+      if (wsInstance.readyState === WebSocket.OPEN || wsInstance.readyState === WebSocket.CONNECTING) {
+        wsInstance.close();
+      }
+    }
+    if (wsPingTimer) {
+      clearInterval(wsPingTimer);
+      wsPingTimer = null;
+    }
+
+    wsInstance = new WebSocket(wsUrl);
+    wsInstance.on('open', () => {
       console.log('[ws] connected');
       for (const [id, program] of [[1, PUMP_PROGRAM], [2, PUMP_AMM]]) {
-        ws.send(JSON.stringify({
+        wsInstance.send(JSON.stringify({
           jsonrpc: '2.0',
           id,
           method: 'logsSubscribe',
           params: [{ mentions: [program] }, { commitment: 'confirmed' }],
         }));
       }
-      pingTimer = setInterval(() => {
-        if (ws.readyState === WebSocket.OPEN) ws.ping();
+      wsPingTimer = setInterval(() => {
+        if (wsInstance && wsInstance.readyState === WebSocket.OPEN) wsInstance.ping();
       }, 30_000);
     });
-    ws.on('message', raw => {
+    wsInstance.on('message', raw => {
       let msg;
       try {
         msg = JSON.parse(raw);
@@ -95,12 +128,21 @@ export function startWebsocket() {
         processLog(value).catch(error => console.log(`[ws] process failed: ${error.message}`));
       }
     });
-    ws.on('close', () => {
-      clearInterval(pingTimer);
+    wsInstance.on('close', () => {
+      if (wsPingTimer) {
+        clearInterval(wsPingTimer);
+        wsPingTimer = null;
+      }
       console.log('[ws] closed, reconnecting in 5s');
       setTimeout(connect, 5000);
     });
-    ws.on('error', error => console.log(`[ws] ${error.message}`));
+    wsInstance.on('error', error => {
+      console.log(`[ws] ${error.message}`);
+      if (wsPingTimer) {
+        clearInterval(wsPingTimer);
+        wsPingTimer = null;
+      }
+    });
   }
   connect();
 }

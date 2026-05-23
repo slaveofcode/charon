@@ -15,17 +15,26 @@ const gmgnBackoff = {
 
 // Proxy agent for residential proxy (bypass Cloudflare)
 let proxyDispatcher = null;
+let proxyInitPromise = null;
 async function getProxyDispatcher() {
   if (!GMGN_PROXY_URL) return null;
   if (proxyDispatcher) return proxyDispatcher;
-  try {
-    const { ProxyAgent } = await import('undici');
-    proxyDispatcher = new ProxyAgent(GMGN_PROXY_URL);
-    console.log(`[gmgn] proxy configured: ${GMGN_PROXY_URL.replace(/\/\/.*@/, '//****:****@')}`);
-  } catch (err) {
-    console.log(`[gmgn] proxy init failed: ${err.message}`);
-  }
-  return proxyDispatcher;
+
+  // Prevent race condition: if initialization is in progress, wait for it
+  if (proxyInitPromise) return proxyInitPromise;
+
+  proxyInitPromise = (async () => {
+    try {
+      const { ProxyAgent } = await import('undici');
+      proxyDispatcher = new ProxyAgent(GMGN_PROXY_URL);
+      console.log(`[gmgn] proxy configured: ${GMGN_PROXY_URL.replace(/\/\/.*@/, '//****:****@')}`);
+    } catch (err) {
+      console.log(`[gmgn] proxy init failed: ${err.message}`);
+    }
+    return proxyDispatcher;
+  })();
+
+  return proxyInitPromise;
 }
 
 async function paceGmgnRequest() {
@@ -173,6 +182,15 @@ function tokenPriceFromGmgn(info) {
 
 async function fetchGmgnTokenInfo(mint, useCache = true) {
   if (!GMGN_ENABLED) return null;
+
+  // Prune expired cache entries to prevent memory leak
+  const currentTime = now();
+  for (const [key, entry] of gmgnCache) {
+    if (currentTime - entry.at > GMGN_CACHE_TTL_MS) {
+      gmgnCache.delete(key);
+    }
+  }
+
   const cached = gmgnCache.get(mint);
   if (useCache && cached && now() - cached.at < GMGN_CACHE_TTL_MS) return cached.data;
   if (gmgnBackoffActive('token')) {
