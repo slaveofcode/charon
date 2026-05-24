@@ -34,6 +34,11 @@ function nextRpcUrl() {
   return url;
 }
 
+function getRotatedConnection() {
+  const url = nextRpcUrl();
+  return new Connection(url, 'confirmed');
+}
+
 function parseKeypair(secret) {
   const value = String(secret || '').trim();
   if (!value) return null;
@@ -45,7 +50,7 @@ export function initLiveExecution() {
   if (!SOLANA_PRIVATE_KEY) return;
   try {
     liveWallet = parseKeypair(SOLANA_PRIVATE_KEY);
-    solanaConnection = new Connection(SOLANA_RPC_URL, 'confirmed');
+    solanaConnection = getRotatedConnection();
     console.log(`[live] wallet loaded ${liveWallet.publicKey.toBase58()}`);
   } catch (err) {
     liveWallet = null;
@@ -60,17 +65,27 @@ export function liveWalletPubkey() {
 
 export async function fetchLiveTokenBalance(mint) {
   if (!liveWallet || !solanaConnection) return null;
-  try {
-    const accounts = await solanaConnection.getParsedTokenAccountsByOwner(
-      liveWallet.publicKey,
-      { mint: new PublicKey(mint) },
-      'confirmed',
-    );
-    return accounts.value[0]?.account?.data?.parsed?.info?.tokenAmount?.amount || null;
-  } catch (err) {
-    console.log(`[live] token balance ${mint.slice(0, 8)}... ${err.message}`);
-    return null;
+  const maxAttempts = 5;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      const conn = attempt === 1 ? solanaConnection : getRotatedConnection();
+      const accounts = await conn.getParsedTokenAccountsByOwner(
+        liveWallet.publicKey,
+        { mint: new PublicKey(mint) },
+        'confirmed',
+      );
+      return accounts.value[0]?.account?.data?.parsed?.info?.tokenAmount?.amount || null;
+    } catch (err) {
+      const is429 = err.message?.includes('429') || err.message?.includes('rate limit') || err.message?.includes('max usage');
+      if (is429 && attempt < maxAttempts) {
+        console.log(`[live] token balance RPC 429 — rotating key (attempt ${attempt})`);
+        continue;
+      }
+      console.log(`[live] token balance ${mint.slice(0, 8)}... ${err.message}`);
+      return null;
+    }
   }
+  return null;
 }
 
 export function requireLiveExecution() {
