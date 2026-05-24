@@ -6,6 +6,7 @@ import { numSetting, setting } from '../db/settings.js';
 const gmgnCache = new Map();
 let lastGmgnRequestAt = 0;
 let gmgnQueue = Promise.resolve();
+let gmgnPriorityQueue = Promise.resolve(); // bypass queue for priority requests
 const gmgnBackoff = {
   tokenUntil: 0,
   tokenReason: '',
@@ -45,9 +46,14 @@ async function paceGmgnRequest() {
   lastGmgnRequestAt = now();
 }
 
-function enqueueGmgn(work) {
-  const run = gmgnQueue.then(work, work);
-  gmgnQueue = run.catch(() => {});
+function enqueueGmgn(work, queue = null) {
+  const q = queue || gmgnQueue;
+  const run = q.then(work, work);
+  if (queue) {
+    gmgnPriorityQueue = run.catch(() => {});
+  } else {
+    gmgnQueue = run.catch(() => {});
+  }
   return run;
 }
 
@@ -225,9 +231,35 @@ function normalizedTrendingRows(payload) {
   return Array.isArray(rows) ? rows : [];
 }
 
+/**
+ * Fetch SOL balance via GMGN wallet portfolio endpoint.
+ * Returns lamports (number) or null on failure.
+ */
+async function fetchGmgnWalletBalance(address) {
+  if (!GMGN_ENABLED) return null;
+  try {
+    const payload = await gmgnFetch(`/v1/wallet/${address}/portfolio`, {
+      params: { chain: 'sol' },
+    });
+    const data = payload?.data || payload;
+    // GMGN returns sol_balance or balance in SOL
+    const solBalance = Number(data?.sol_balance ?? data?.balance ?? null);
+    if (Number.isFinite(solBalance) && solBalance > 0) {
+      return Math.floor(solBalance * 1_000_000_000); // SOL → lamports
+    }
+    return null;
+  } catch (err) {
+    if (err.response?.status !== 403 && err.response?.status !== 429) {
+      console.log(`[gmgn] wallet balance ${address.slice(0, 8)}... ${err.response?.status || ''} ${err.message}`);
+    }
+    return null;
+  }
+}
+
 export {
   gmgnFetch,
   fetchGmgnTokenInfo,
+  fetchGmgnWalletBalance,
   gmgnBackoffActive,
   setGmgnBackoff,
   gmgnStatusText,

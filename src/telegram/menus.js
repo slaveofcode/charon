@@ -6,7 +6,7 @@ import { gmgnStatusText } from '../enrichment/gmgn.js';
 import { formatPosition } from './format.js';
 import { ENABLE_LLM, LLM_API_KEY } from '../config.js';
 
-export function menuKeyboard() {
+export function mainMenuKeyboard() {
   return {
     reply_markup: {
       inline_keyboard: [
@@ -19,6 +19,9 @@ export function menuKeyboard() {
           { text: 'Wallets', callback_data: 'menu:wallets' },
           { text: 'Positions', callback_data: 'menu:positions' },
           { text: 'PnL', callback_data: 'menu:pnl' },
+        ],
+        [
+          { text: '🛒 Manual Buy', callback_data: 'menu:buy' },
         ],
       ],
     },
@@ -172,8 +175,37 @@ export function navKeyboard(rows = []) {
   };
 }
 
+export function buyMenuText() {
+  const strat = activeStrategy();
+  return [
+    '🛒 <b>Manual Buy</b>',
+    '',
+    'Buy a specific token directly.',
+    '',
+    '• <b>Force Buy</b> — skip LLM, execute immediately',
+    '• <b>LLM Check</b> — analyze first, then decide',
+    '',
+    `Default size: <b>${fmtSol(strat.position_size_sol)} SOL</b>`,
+    'You can specify amount like: <code>0.1</code>',
+  ].join('\n');
+}
+
 export function mainMenuText() {
   return `🛶 <b>Charon</b>\nDry-run trench agent online.`;
+}
+
+export function buyKeyboard() {
+  return {
+    reply_markup: {
+      inline_keyboard: [
+        [
+          { text: '⚡ Force Buy', callback_data: 'buyinput:force' },
+          { text: '🤖 LLM Check', callback_data: 'buyinput:check' },
+        ],
+        [{ text: 'Back', callback_data: 'menu:main' }],
+      ],
+    },
+  };
 }
 
 export function walletsText() {

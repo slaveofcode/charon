@@ -41,6 +41,10 @@ export async function startCharon() {
     const { startGmgnDiscovery } = await import('./signals/gmgnDiscovery.js');
     startGmgnDiscovery();
 
+    // Graduated token discovery — poll GMGN for matured/bonded tokens
+    const { startGraduatedDiscovery } = await import('./signals/graduatedDiscovery.js');
+    startGraduatedDiscovery();
+
     console.log(`[bot] ${APP_NAME} started (server mode: ${SIGNAL_SERVER_URL})`);
   } else {
     // ── Standalone mode: direct polling (legacy) ───────────────────────────

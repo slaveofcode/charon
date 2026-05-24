@@ -122,9 +122,9 @@ export function filterCandidate(candidate) {
   return { passed: failures.length === 0, failures, strategy: strat.id };
 }
 
-export async function buildCandidate({ mint, fee = null, signature = null, graduatedCoin = null, trendingToken = null, route }) {
+export async function buildCandidate({ mint, fee = null, signature = null, graduatedCoin = null, trendingToken = null, route, skipGmgn = false }) {
   const strat = activeStrategy();
-  const gmgn = await fetchGmgnTokenInfo(mint);
+  const gmgn = skipGmgn ? null : await fetchGmgnTokenInfo(mint);
   const jupiterAsset = await fetchJupiterAsset(mint);
   const holders = await fetchJupiterHolders(mint);
   const chart = await fetchJupiterChartContext(mint);

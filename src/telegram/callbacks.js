@@ -1,9 +1,10 @@
 import { bot } from './bot.js';
 import { TELEGRAM_CHAT_ID } from '../config.js';
 import { now } from '../utils.js';
+import { db } from '../db/connection.js';
 import { numSetting, boolSetting, setSetting, setActiveStrategy, activeStrategy, updateStrategyConfig } from '../db/settings.js';
 import {
-  menuKeyboard,
+  mainMenuKeyboard,
   filtersText,
   filtersKeyboard,
   agentText,
@@ -16,6 +17,8 @@ import {
   sendTpSlDefaults,
   strategyMenuText,
   strategyKeyboard,
+  buyMenuText,
+  buyKeyboard,
 } from './menus.js';
 import { sendTelegram, sendBatch, sendPositionOpen, sendTradeIntent } from './send.js';
 import { candidateSummary } from './format.js';
@@ -24,7 +27,8 @@ import { storeDecision, logDecisionEvent } from '../db/decisions.js';
 import { createDryRunPosition, canOpenMorePositions, openPositionCount, tradingMode } from '../db/positions.js';
 import { executeLiveBuy, executeConfirmedIntent, rejectIntent } from '../execution/router.js';
 import { sendCandidate, sendPosition, closePosition, updatePositionRule, toggleTrailing } from './commands.js';
-import { requestNumericFilterInput, requestStrategyNumericInput } from './input.js';
+import { requestNumericFilterInput, requestStrategyNumericInput, requestBuyMintInput } from './input.js';
+import { handleApprovedBuy } from '../pipeline/orchestrator.js';
 
 export async function handleCallback(query) {
   const data = query.data || '';
@@ -35,7 +39,8 @@ export async function handleCallback(query) {
     pendingNumericInputs.delete(String(chatId));
   }
 
-  if (data === 'menu:main') return editMenuMessage(query, mainMenuText(), menuKeyboard());
+  if (data === 'menu:main') return editMenuMessage(query, mainMenuText(), mainMenuKeyboard());
+  if (data === 'menu:buy') return editMenuMessage(query, buyMenuText(), buyKeyboard());
   if (data === 'noop') return null;
   if (data === 'menu:agent') {
     return editMenuMessage(query, agentText(), agentKeyboard());
@@ -77,14 +82,72 @@ export async function handleCallback(query) {
     const key = data.replace('stratinput:', '');
     return requestStrategyNumericInput(query, key);
   }
+  if (data.startsWith('buyinput:')) {
+    const mode = data.replace('buyinput:', ''); // 'force' or 'check'
+    return requestBuyMintInput(query, mode);
+  }
 
-  const [kind, id, value] = data.split(':');
+  const parts = data.split(':');
+  const [kind, id, value] = parts;
   if (kind === 'input') return requestNumericFilterInput(query, id);
   if (kind === 'set') return updateSettingFromButton(query, id, value);
   if (kind === 'batch') return sendBatch(chatId, Number(id));
   if (kind === 'intent') {
     if (value === 'confirm') return executeConfirmedIntent(chatId, Number(id));
     if (value === 'reject') return rejectIntent(chatId, Number(id));
+  }
+  if (kind === 'manualbuy') {
+    const action = id; // 'exec' or 'pass'
+    const candidateId = Number(value);
+    const execSize = Number(parts[3]) || null; // optional specified size
+    if (action === 'pass') {
+      updateCandidateStatus(candidateId, 'ignored');
+      return bot.editMessageText('❌ Passed on this token.', {
+        chat_id: chatId,
+        message_id: query.message.message_id,
+      }).catch(() => {});
+    }
+    if (action === 'exec') {
+      const row = candidateById(candidateId);
+      if (!row) return bot.sendMessage(chatId, 'Candidate not found.');
+      if (!canOpenMorePositions()) {
+        return bot.sendMessage(chatId, `Max open positions reached (${openPositionCount()}/${numSetting('max_open_positions', 3)}).`);
+      }
+      const candidate = row.candidate;
+      const strat = activeStrategy();
+
+      // Look up LLM-suggested position size from stored decision
+      const lastDecision = db.prepare('SELECT * FROM llm_decisions WHERE candidate_id = ? ORDER BY id DESC LIMIT 1').get(candidateId);
+      const llmSize = lastDecision ? Number(lastDecision.suggested_position_size_sol) : null;
+      const finalSize = execSize || llmSize || strat.position_size_sol;
+
+      const decision = {
+        verdict: 'BUY',
+        confidence: 100,
+        selected_candidate_id: candidateId,
+        selected_mint: candidate.token.mint,
+        selected_row: row,
+        reason: 'User approved after LLM check',
+        risks: [],
+        suggested_tp_percent: strat.tp_percent ?? 65,
+        suggested_sl_percent: strat.sl_percent ?? -15,
+        suggested_position_size_sol: finalSize,
+        raw: null,
+      };
+      const decisionId = storeDecision(candidateId, candidate, decision);
+      decision.id = decisionId;
+
+      await bot.editMessageText('✅ Executing buy...', {
+        chat_id: chatId,
+        message_id: query.message.message_id,
+      }).catch(() => {});
+      const result = await handleApprovedBuy(row, decision, null, [row], candidateId);
+      if (result?.success) {
+        return bot.sendMessage(chatId, `✅ Buy successful! Check /positions for details.`).catch(() => {});
+      } else {
+        return bot.sendMessage(chatId, `❌ Buy failed: ${result?.error || 'unknown error'}. Check messages above.`).catch(() => {});
+      }
+    }
   }
   if (kind === 'cand') return sendCandidate(chatId, Number(id));
   if (kind === 'ign') {

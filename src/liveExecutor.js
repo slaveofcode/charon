@@ -9,9 +9,30 @@ import {
   SOLANA_PRIVATE_KEY,
   SOLANA_RPC_URL,
 } from './config.js';
+import { now } from './utils.js';
 
 let liveWallet = null;
 let solanaConnection = null;
+let cachedBalance = null;
+
+// Multi-key RPC rotation
+let rpcKeyIndex = 0;
+function getRpcUrls() {
+  const keys = (process.env.HELIUS_API_KEY || '')
+    .split(',')
+    .map(k => k.trim())
+    .filter(Boolean);
+  if (!keys.length) return [SOLANA_RPC_URL, 'https://api.mainnet-beta.solana.com'];
+  const urls = keys.map(key => `https://mainnet.helius-rpc.com/?api-key=${key}`);
+  urls.push('https://api.mainnet-beta.solana.com'); // final fallback
+  return urls;
+}
+function nextRpcUrl() {
+  const urls = getRpcUrls();
+  const url = urls[rpcKeyIndex % urls.length];
+  rpcKeyIndex++;
+  return url;
+}
 
 function parseKeypair(secret) {
   const value = String(secret || '').trim();
@@ -59,7 +80,59 @@ export function requireLiveExecution() {
 
 export async function liveWalletBalanceLamports() {
   requireLiveExecution();
-  return solanaConnection.getBalance(liveWallet.publicKey, 'confirmed');
+  // Cache balance for 60s to avoid hammering APIs
+  if (cachedBalance != null && now() - cachedBalance.at < 60_000) {
+    return cachedBalance.lamports;
+  }
+  const pubkey = liveWallet.publicKey.toBase58();
+
+  // Try GMGN first (already have API key + queued)
+  try {
+    const { fetchGmgnWalletBalance } = await import('./enrichment/gmgn.js');
+    const gmgnBal = await fetchGmgnWalletBalance(pubkey);
+    if (gmgnBal != null) {
+      cachedBalance = { lamports: gmgnBal, at: now() };
+      return gmgnBal;
+    }
+  } catch {}
+
+  // Fallback: RPC with key rotation on 429
+  for (let attempt = 1; attempt <= 6; attempt++) {
+    const rpcUrl = nextRpcUrl();
+    if (rpcUrl === 'https://api.mainnet-beta.solana.com' && attempt > 3) break; // don't spam public RPC
+    try {
+      const res = await fetch(rpcUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          jsonrpc: '2.0',
+          id: 1,
+          method: 'getBalance',
+          params: [pubkey],
+        }),
+      });
+      const data = await res.json();
+      if (data?.result?.value != null) {
+        const lamports = Number(data.result.value);
+        cachedBalance = { lamports, at: now() };
+        return lamports;
+      }
+      // 429 = rate limited, try next key
+      if (res.status === 429 || data?.error?.code === -32429 || data?.error?.code === 429) {
+        console.log(`[live] RPC 429 — rotating to next key (attempt ${attempt})`);
+        continue;
+      }
+      break;
+    } catch {
+      continue;
+    }
+  }
+  // Final fallback
+  if (cachedBalance != null) {
+    console.log(`[live] all balance sources failed, using cached balance from ${((now() - cachedBalance.at) / 1000).toFixed(0)}s ago`);
+    return cachedBalance.lamports;
+  }
+  throw new Error('All balance sources failed (GMGN + RPC) — wallet may not exist');
 }
 
 async function jupiterOrder({ inputMint, outputMint, amount }) {

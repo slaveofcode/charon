@@ -7,7 +7,7 @@ import { numSetting, boolSetting, setSetting, activeStrategy, setActiveStrategy,
 import { candidateById, latestCandidateByMint, updateCandidateStatus } from '../db/candidates.js';
 import { storeDecision, logDecisionEvent } from '../db/decisions.js';
 import {
-  menuKeyboard,
+  mainMenuKeyboard,
   filtersText,
   filtersKeyboard,
   agentText,
@@ -17,9 +17,11 @@ import {
   walletsText,
   positionsText,
   candidateButtons,
-  positionButtons,
+  sendTpSlDefaults,
   strategyMenuText,
   strategyKeyboard,
+  buyMenuText,
+  buyKeyboard,
 } from './menus.js';
 import { sendTelegram, sendBatch, sendPositionOpen } from './send.js';
 import { candidateSummary, formatPosition } from './format.js';
@@ -27,14 +29,39 @@ import { refreshPosition } from '../execution/positions.js';
 import { executeLiveSell } from '../execution/router.js';
 import { handleCallback, editMenuMessage } from './callbacks.js';
 import { consumeNumericFilterInput } from './input.js';
+import { pendingBuyInputs } from './input.js';
 import { runLearning, sendLessons } from '../learning/commands.js';
 import { fetchWalletPnl } from '../enrichment/wallets.js';
+import { onBotReady } from './bot.js';
 
 export async function handleMessage(msg) {
-  const text = (msg.text || '').trim();
+  let text = (msg.text || '').trim();
   const chatId = msg.chat.id;
   if (await consumeNumericFilterInput(chatId, text, msg.message_id)) return;
+
+  // Check for pending buy mint input (from Manual Buy menu)
+  const pendingBuy = pendingBuyInputs.get(String(chatId));
+  if (pendingBuy && now() - pendingBuy.at < 5 * 60 * 1000) {
+    pendingBuyInputs.delete(String(chatId));
+    const parts = text.trim().split(/\s+/);
+    const mint = parts[0];
+    if (!mint || mint.length < 32) {
+      return bot.sendMessage(chatId, 'Invalid mint address. Please try again from the Manual Buy menu.');
+    }
+    const amount = parts[1] || '';
+    const cmd = pendingBuy.mode === 'check' ? '/buy --check' : '/buy';
+    // Send loading message immediately — GMGN queue can be backed up
+    bot.sendMessage(chatId, `⏳ Loading ${mint.slice(0, 8)}... data, please wait`).catch(() => {});
+    // Simulate the command
+    msg.text = `${cmd} ${mint}${amount ? ' ' + amount : ''}`;
+    if (msg.message_id) bot.deleteMessage(chatId, msg.message_id).catch(() => {});
+    // Continue to command routing below — update text variable too
+    text = msg.text;
+  }
+
   if (!text.startsWith('/')) return;
+  if (text.startsWith('/sell ')) return handleSell(chatId, text);
+  if (text.startsWith('/buy ')) return handleBuy(chatId, text);
   if (text.startsWith('/close')) return handleClose(chatId, text);
   if (text.startsWith('/settp')) return handleSetTp(chatId, text);
   if (text.startsWith('/setsl')) return handleSetSl(chatId, text);
@@ -243,28 +270,192 @@ export async function toggleTrailing(chatId, id, query = null) {
 }
 
 export function setupTelegram() {
-  bot.setMyCommands([
-    { command: 'menu', description: 'Open Charon menu' },
-    { command: 'strategy', description: 'Show/switch strategy' },
-    { command: 'stratset', description: 'Set strategy config (stratset id key value)' },
-    { command: 'positions', description: 'Show dry-run positions' },
-    { command: 'candidate', description: 'Show candidate by mint' },
-    { command: 'filters', description: 'Show filters' },
-    { command: 'pnl', description: 'Show saved-wallet PnL' },
-    { command: 'learn', description: 'Run manual learning report' },
-    { command: 'lessons', description: 'Show active screening lessons' },
-    { command: 'setfilter', description: 'Set a filter value' },
-    { command: 'walletadd', description: 'Save wallet for exposure/PnL' },
-    { command: 'walletremove', description: 'Remove saved wallet' },
-    { command: 'wallets', description: 'List saved wallets' },
-    { command: 'close', description: 'Close position by id (/close 2)' },
-    { command: 'settp', description: 'Set TP percent (/settp 2 75)' },
-    { command: 'setsl', description: 'Set SL percent (/setsl 2 -40)' },
-  ]).catch(err => console.log(`[telegram] commands ${err.message}`));
+  const attachListeners = (bot) => {
+    bot.setMyCommands([
+      { command: 'menu', description: 'Open Charon menu' },
+      { command: 'strategy', description: 'Show/switch strategy' },
+      { command: 'stratset', description: 'Set strategy config (stratset id key value)' },
+      { command: 'positions', description: 'Show dry-run positions' },
+      { command: 'candidate', description: 'Show candidate by mint' },
+      { command: 'filters', description: 'Show filters' },
+      { command: 'pnl', description: 'Show saved-wallet PnL' },
+      { command: 'learn', description: 'Run manual learning report' },
+      { command: 'lessons', description: 'Show active screening lessons' },
+      { command: 'setfilter', description: 'Set a filter value' },
+      { command: 'walletadd', description: 'Save wallet for exposure/PnL' },
+      { command: 'walletremove', description: 'Remove saved wallet' },
+      { command: 'wallets', description: 'List saved wallets' },
+      { command: 'close', description: 'Close position by id (/close 2)' },
+      { command: 'buy', description: 'Manual buy by mint (/buy <mint>)' },
+      { command: 'sell', description: 'Sell position by id or mint (/sell <id> or /sell <mint>)' },
+      { command: 'settp', description: 'Set TP percent (/settp 2 75)' },
+      { command: 'setsl', description: 'Set SL percent (/setsl 2 -40)' },
+    ]).catch(err => console.log(`[telegram] commands ${err.message}`));
 
-  bot.on('callback_query', query => handleCallback(query).catch(err => console.log(`[callback] ${err.message}`)));
-  bot.on('message', msg => handleMessage(msg).catch(err => console.log(`[message] ${err.message}`)));
-  bot.on('polling_error', err => console.log(`[telegram] polling ${err.message}`));
+    bot.on('callback_query', query => handleCallback(query).catch(err => console.log(`[callback] ${err.message}`)));
+    bot.on('message', msg => handleMessage(msg).catch(err => console.log(`[message] ${err.message}`)));
+    bot.on('polling_error', () => {}); // handled in bot.js
+  };
+
+  // Attach now and register for future bot recreations
+  attachListeners(bot);
+  onBotReady(attachListeners);
+}
+
+async function handleBuy(chatId, text) {
+  const parts = text.split(/\s+/);
+  const checkMode = parts[1] === '--check';
+  const offset = checkMode ? 2 : 1;
+  const mint = parts[offset];
+  const specifiedSize = parts[offset + 1] ? Number(parts[offset + 1]) : null;
+
+  if (!mint || mint.length < 32 || (specifiedSize != null && !Number.isFinite(specifiedSize))) {
+    return bot.sendMessage(chatId, 'Usage: /buy <mint> [amount_sol] or /buy --check <mint> [amount_sol]');
+  }
+  try {
+    const { buildCandidate } = await import('../pipeline/candidateBuilder.js');
+    const { upsertCandidate, candidateById } = await import('../db/candidates.js');
+    const { storeDecision, logDecisionEvent } = await import('../db/decisions.js');
+    const { handleApprovedBuy } = await import('../pipeline/orchestrator.js');
+    const { activeStrategy } = await import('../db/settings.js');
+    const { compactCandidateForLlm, decideCandidateBatch, normalizeDecision } = await import('../pipeline/llm.js');
+    const { fmtPct } = await import('../format.js');
+    const { candidateSummary } = await import('../telegram/format.js');
+    const { bot } = await import('../telegram/bot.js');
+
+    // Send progress messages so user knows what's happening
+    const progressMsg = await bot.sendMessage(chatId, `🔍 Fetching token data for ${escapeHtml(mint.slice(0, 8))}... (waiting for API queue)`).catch(() => null);
+    const progressId = progressMsg?.message_id;
+
+    // Timeout for buildCandidate (GMGN queue can be slow) — use partial data if it times out
+    let candidate = await Promise.race([
+      buildCandidate({ mint, route: 'manual_buy' }),
+      new Promise(resolve => setTimeout(() => resolve(null), 45_000)),
+    ]);
+
+    // If buildCandidate timed out, build a minimal candidate from Jupiter only
+    if (!candidate) {
+      if (progressId) {
+        bot.editMessageText('⏳ GMGN queue full, fetching from Jupiter directly...', {
+          chat_id: chatId, message_id: progressId,
+        }).catch(() => {});
+      }
+      candidate = await buildCandidate({ mint, route: 'manual_buy', skipGmgn: true });
+    }
+
+    // Update progress or send new status
+    if (progressId) {
+      bot.editMessageText(`✅ Token data loaded\n⏳ ${checkMode ? 'Running LLM analysis...' : 'Preparing execution...'}`, {
+        chat_id: chatId, message_id: progressId,
+      }).catch(() => {});
+    }
+
+    const candidateId = upsertCandidate(candidate, null);
+    const row = candidateById(candidateId);
+    const strat = activeStrategy();
+
+    // Effective position size: specified > LLM-suggested > strategy default
+    const effectiveSize = specifiedSize || strat.position_size_sol;
+
+    if (checkMode) {
+      // LLM analysis first — show result, let user decide
+      const rows = [row];
+
+      // Update progress to LLM analysis
+      if (progressId) {
+        bot.editMessageText('✅ Token data loaded\n✅ LLM analysis complete\n⏳ Generating report...', {
+          chat_id: chatId, message_id: progressId,
+        }).catch(() => {});
+      }
+
+      const batchDecision = await decideCandidateBatch(rows, candidateId);
+
+      const analysisText = [
+        `🤖 <b>LLM Analysis: ${escapeHtml(candidate.token?.symbol || mint.slice(0, 8))}</b>`,
+        '',
+        `Verdict: <b>${batchDecision.verdict}</b> | Confidence: <b>${batchDecision.confidence}%</b>`,
+        `Reason: ${escapeHtml(batchDecision.reason || 'N/A')}`,
+        batchDecision.risks?.length ? `⚠️ Risks: ${batchDecision.risks.map(r => escapeHtml(r)).join('; ')}` : '',
+        '',
+        `📍 TP: ${batchDecision.suggested_tp_percent}% | SL: ${batchDecision.suggested_sl_percent}%`,
+        `💰 Size: <b>${specifiedSize ? specifiedSize + ' SOL (specified)' : batchDecision.suggested_position_size_sol != null ? batchDecision.suggested_position_size_sol + ' SOL (LLM)' : strat.position_size_sol + ' SOL (default)'}</b>`,
+        '',
+        `Market Cap: ${candidate.metrics?.marketCapUsd != null ? '$' + Number(candidate.metrics.marketCapUsd).toLocaleString() : '?'}`,
+        `Holders: ${candidate.metrics?.holderCount || '?'}`,
+        `ATH Dist: ${candidate.metrics?.athDistancePercent != null ? fmtPct(candidate.metrics.athDistancePercent) : '?'}`,
+      ].join('\n');
+
+      const keyboard = {
+        reply_markup: {
+          inline_keyboard: [
+            [
+              { text: '✅ Buy', callback_data: `manualbuy:exec:${candidateId}:${effectiveSize}` },
+              { text: '❌ Pass', callback_data: `manualbuy:pass:${candidateId}:0` },
+            ],
+          ],
+        },
+      };
+
+      // Store decision for reference
+      const currentDecision = {
+        ...batchDecision,
+        verdict: 'WATCH', // Not auto-approved — user decides
+        reason: `[Manual check] ${batchDecision.reason || ''}`.trim(),
+      };
+      storeDecision(candidateId, candidate, currentDecision);
+
+      // Remove progress message, show full analysis
+      if (progressId) bot.deleteMessage(chatId, progressId).catch(() => {});
+
+      return bot.sendMessage(chatId, analysisText, { parse_mode: 'HTML', ...keyboard });
+    }
+
+    // Force buy — skip filters and LLM, execute immediately
+    if (!candidate.filters.passed) {
+      if (progressId) bot.deleteMessage(chatId, progressId).catch(() => {});
+      return bot.sendMessage(chatId, `Token failed filters: ${escapeHtml(candidate.filters.failures.join('; '))}. Use --check for LLM analysis first.`);
+    }
+
+    const decision = {
+      verdict: 'BUY',
+      confidence: 100,
+      selected_candidate_id: candidateId,
+      selected_mint: mint,
+      selected_row: row,
+      reason: specifiedSize
+        ? `Manual force buy — ${effectiveSize} SOL`
+        : 'Manual force buy via /buy command',
+      risks: ['Manual buy — no LLM screening'],
+      suggested_tp_percent: strat.tp_percent ?? 65,
+      suggested_sl_percent: strat.sl_percent ?? -15,
+      suggested_position_size_sol: effectiveSize,
+      raw: null,
+    };
+    const decisionId = storeDecision(candidateId, candidate, decision);
+    decision.id = decisionId;
+
+    await handleApprovedBuy(row, decision, null, [row], candidateId);
+    return bot.sendMessage(chatId, `✅ Force buy executed for ${escapeHtml(candidate.token?.symbol || mint.slice(0, 8))}. Check /positions for status.`);
+  } catch (err) {
+    return bot.sendMessage(chatId, `Error: ${escapeHtml(err.message)}`);
+  }
+}
+
+async function handleSell(chatId, text) {
+  const parts = text.split(/\s+/);
+  const arg = parts[1];
+  if (!arg) {
+    return bot.sendMessage(chatId, 'Usage: /sell <position_id> or /sell <mint>');
+  }
+  // Try position ID first
+  const id = Number(arg);
+  if (Number.isFinite(id) && id > 0) {
+    return closePosition(chatId, id, 'MANUAL_SELL');
+  }
+  // Mint — find open position by mint
+  const row = db.prepare("SELECT id FROM dry_run_positions WHERE mint = ? AND status = 'open' ORDER BY id DESC LIMIT 1").get(arg);
+  if (row) return closePosition(chatId, row.id, 'MANUAL_SELL');
+  return bot.sendMessage(chatId, `No open position found for ${escapeHtml(arg.slice(0, 8))}...`);
 }
 
 async function handleClose(chatId, text) {
@@ -296,7 +487,7 @@ async function sendMenu(chatId = TELEGRAM_CHAT_ID) {
     parse_mode: 'HTML',
     disable_web_page_preview: true,
     ...(TELEGRAM_TOPIC_ID ? { message_thread_id: Number(TELEGRAM_TOPIC_ID) } : {}),
-    ...menuKeyboard(),
+    ...mainMenuKeyboard(),
   });
 }
 

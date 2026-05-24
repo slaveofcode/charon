@@ -13,6 +13,7 @@ import {
 } from './menus.js';
 
 export const pendingNumericInputs = new Map();
+export const pendingBuyInputs = new Map(); // chatId → { mode: 'force'|'check', at: now, messageId }
 
 export async function requestNumericFilterInput(query, key) {
   const chatId = query.message?.chat?.id || TELEGRAM_CHAT_ID;
@@ -99,6 +100,20 @@ export async function consumeNumericFilterInput(chatId, text, userMessageId = nu
     }
   }
   return true;
+}
+
+export async function requestBuyMintInput(query, mode) {
+  const chatId = query.message?.chat?.id || TELEGRAM_CHAT_ID;
+  pendingBuyInputs.set(String(chatId), {
+    mode, // 'force' or 'check'
+    at: now(),
+    messageId: query.message?.message_id || null,
+  });
+  return editMenuMessage(
+    query,
+    `Send the token mint address to ${mode === 'force' ? 'force buy' : 'LLM check'}.\n\nExample: <code>9W7FDcBpVcCi7iH6MQEuyJcH2VZMsXvSrW4Gvkadpump</code>\n\nYou can optionally add amount: <code>&lt;mint&gt; 0.1</code>`,
+    navKeyboard([[{ text: 'Cancel', callback_data: 'menu:buy' }]]),
+  );
 }
 
 async function editMenuMessage(query, text, extra = {}) {

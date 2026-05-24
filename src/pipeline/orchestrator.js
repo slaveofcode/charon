@@ -24,11 +24,11 @@ export const seenSignalCandidates = new Map();
 const FILTERED_TTL_MS = 30 * 60 * 1000; // 30 minutes
 const recentlyFilteredTokens = new Map();
 
-// Cross-source dedup: track ALL mints processed (filtered or not) within TTL
-// so a token from signal server isn't reprocessed when GMGN discovery finds it.
-// Key: mint address, Value: timestamp.
-const PROCESSED_TTL_MS = 30 * 60 * 1000; // 30 minutes
-const processedTokens = new Map();
+// Cross-source dedup removed intentionally.
+// Each source (signal server, GMGN discovery, graduated discovery)
+// independently evaluates tokens for maximum coverage.
+// Kept: recentlyFilteredTokens (skip tokens that failed filters)
+// and pendingProcessing (prevent parallel same-mint processing).
 
 // In-flight lock to prevent parallel processing of the same mint from
 // multiple paths (signal server + dip price monitor).
@@ -55,24 +55,12 @@ export async function processCandidateFromSignals(signals) {
     return;
   }
 
-  // Cross-source dedup: skip if already processed by another signal source
-  // e.g. token from signal server shouldn't be reprocessed by GMGN discovery
-  pruneSeen(processedTokens, PROCESSED_TTL_MS);
-  if (processedTokens.has(mint)) {
-    const ageMin = Math.round((now() - processedTokens.get(mint)) / 60000);
-    console.log(`[agent] skipping already-processed ${mint.slice(0, 8)}... from ${signals.route || '?'} (processed ${ageMin}m ago)`);
-    return;
-  }
-
   // In-flight lock: skip if this mint is already being processed
   if (pendingProcessing.has(mint)) {
     console.log(`[agent] already processing ${mint.slice(0, 8)}..., skipping duplicate`);
     return;
   }
   pendingProcessing.add(mint);
-  // Mark as processed across all sources immediately — even if it later fails,
-  // we don't want another source re-processing it within the TTL window.
-  processedTokens.set(mint, now());
 
   try {
     const candidate = await buildCandidate(signals);
@@ -82,12 +70,24 @@ export async function processCandidateFromSignals(signals) {
       const failures = candidate.filters.failures.join('; ');
       const symbol = candidate.token?.symbol || candidate.token?.mint?.slice(0, 8) || '?';
       const route = candidate.signals?.route || 'signal';
+      const sourceLabel = {
+        gmgn_discovery: '🟢 GMGN Discovery (pump.fun)',
+        graduated_discovery: '🔵 Graduated Discovery',
+        fee_graduated_trending: '🟣 Signal Server (all sources)',
+        fee_graduated: '🟣 Signal Server (fee+graduated)',
+        fee_trending: '🟣 Signal Server (fee+trending)',
+        graduated_trending: '🟣 Signal Server (graduated+trending)',
+        multi_source: '🟣 Signal Server (3+ sources)',
+        dual_source: '🟣 Signal Server (2 sources)',
+        single_source: '🟣 Signal Server (1 source)',
+        dip_dip_buy: '🔴 Dip Trigger',
+      }[route] || `Other (${route})`;
       console.log(`[candidate] filtered ${candidate.token.mint.slice(0, 8)}... ${failures}`);
       recentlyFilteredTokens.set(mint, now());
       sendTelegram([
         `📡 <b>Signal filtered</b>`,
         `Token: <a href="https://gmgn.ai/sol/token/${candidate.token.mint}">${escapeHtml(symbol)}</a> (${candidate.token.mint.slice(0, 8)}...)`,
-        `Route: ${escapeHtml(route)}`,
+        `Source: ${sourceLabel}`,
         `Filtered: ${escapeHtml(failures)}`,
       ].join('\n')).catch(() => {});
       return;
@@ -222,7 +222,7 @@ export async function handleApprovedBuy(selectedRow, decision, batchId, rows = [
       execution: { positionId },
     });
     await sendPositionOpen(positionId);
-    return;
+    return { success: true, mode: 'dry_run', positionId };
   }
 
   if (mode === 'confirm') {
@@ -244,17 +244,18 @@ export async function handleApprovedBuy(selectedRow, decision, batchId, rows = [
 
   // LIVE: try execution with retry and fallback
   let lastError = null;
-  for (let attempt = 1; attempt <= 2; attempt++) {
+  for (let attempt = 1; attempt <= 3; attempt++) {
     try {
       await executeLiveBuy(freshSelectedRow, decision, batchId, executionRows, triggerCandidateId);
-      return; // success
+      return { success: true, mode: 'live' }; // success
     } catch (err) {
       lastError = err;
       // Retryable: network errors, swap failures, rate limits
       const isRetryable = err.message && !err.message.includes('Honeypot') && !err.message.includes('Insufficient SOL');
-      if (attempt === 1 && isRetryable) {
-        console.log(`[agent] live buy attempt #1 failed: ${err.message.slice(0, 100)} — retrying in 10s`);
-        await sleep(10_000);
+      if (attempt <= 2 && isRetryable) {
+        const delay = attempt === 1 ? 15_000 : 30_000;
+        console.log(`[agent] live buy attempt #${attempt} failed: ${err.message.slice(0, 100)} — retrying in ${delay/1000}s`);
+        await sleep(delay);
         if (!canOpenMorePositions()) {
           console.log(`[agent] retry skipped — max positions reached`);
           break;
@@ -286,6 +287,7 @@ export async function handleApprovedBuy(selectedRow, decision, batchId, rows = [
     `Intent #${intentId} stored.`,
     `Error: ${escapeHtml(lastError?.message || 'unknown')}`,
   ].join('\n'));
+  return { success: false, error: lastError?.message, intentId };
 }
 
 export async function maybeProcessDegenCandidate(mint, trendingToken) {

@@ -16,6 +16,9 @@ export function normalizeDecision(parsed, fallbackReason = '') {
     risks: Array.isArray(parsed?.risks) ? parsed.risks.map(String).slice(0, 8) : [],
     suggested_tp_percent: Number(parsed?.suggested_tp_percent) || numSetting('default_tp_percent', 50),
     suggested_sl_percent: Number(parsed?.suggested_sl_percent) || numSetting('default_sl_percent', -25),
+    suggested_position_size_sol: parsed?.suggested_position_size_sol != null
+      ? Math.max(0.01, Math.min(0.5, Number(parsed.suggested_position_size_sol)))
+      : null,
     raw: parsed,
   };
 }
@@ -98,6 +101,7 @@ export async function decideCandidateBatch(rows, triggerCandidateId) {
       risks: ['no_llm_decision'],
       suggested_tp_percent: numSetting('default_tp_percent', 50),
       suggested_sl_percent: numSetting('default_sl_percent', -25),
+      suggested_position_size_sol: null,
       raw: null,
     };
   }
@@ -113,6 +117,7 @@ export async function decideCandidateBatch(rows, triggerCandidateId) {
     'Chart data is ATH/range context. Do not penalize or reward a token only because 24h change is huge; new Pump tokens often do that.',
     'Use distance from ATH/range high and top-blast risk to decide whether entry is late.',
     'Confidence is your conviction from 0 to 100, not probability.',
+    'suggested_position_size_sol: allocate 0.01-0.5 SOL per position based on token quality, confidence, and risk. Use larger sizes (0.1-0.5) for high-conviction setups with strong metrics. Use smaller sizes (0.01-0.05) for speculative plays. Default wallet has ~0.5-2 SOL.',
   ].join(' ');
   const user = {
     task: 'Pick the best dry-run buy candidate from this recent batch, or choose none.',
@@ -126,6 +131,7 @@ export async function decideCandidateBatch(rows, triggerCandidateId) {
       risks: ['short strings'],
       suggested_tp_percent: 'positive number',
       suggested_sl_percent: 'negative number',
+      suggested_position_size_sol: 'number 0.01-0.5, null if not BUY',
     },
     trigger_candidate_id: triggerCandidateId,
     candidates: rows.map(compactCandidateForLlm),

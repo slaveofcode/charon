@@ -67,7 +67,8 @@ async function checkHoneypot(tokenMint, symbol) {
 
 export async function executeLiveBuy(selectedRow, decision, batchId, rows = [], triggerCandidateId = null) {
   const strat = activeStrategy();
-  const amountLamports = Math.floor((strat.position_size_sol ?? numSetting('dry_run_buy_sol', 0.1)) * 1_000_000_000);
+  const buySol = Number(decision.suggested_position_size_sol) || (strat.position_size_sol ?? numSetting('dry_run_buy_sol', 0.1));
+  const amountLamports = Math.floor(buySol * 1_000_000_000);
   const balance = await liveWalletBalanceLamports();
   if (balance < amountLamports + LIVE_MIN_SOL_RESERVE_LAMPORTS) {
     throw new Error(`Insufficient SOL balance. Need ${fmtSol((amountLamports + LIVE_MIN_SOL_RESERVE_LAMPORTS) / 1_000_000_000)} SOL including reserve.`);
